@@ -546,6 +546,9 @@ void emulated_logitech_g27_settings_dialog::save_ui_state_to_config()
 	}
 
 	g_cfg_logitech_g27.enabled.set(m_enabled->isChecked());
+	g_cfg_logitech_g27.t500rs.set(m_wheel_model->currentData().toBool());
+	g_cfg_logitech_g27.t500rs_protocol.set(m_t500rs_protocol->currentData().toUInt());
+	g_cfg_logitech_g27.t500rs_host_range.set(m_t500rs_host_range->value());
 	g_cfg_logitech_g27.reverse_effects.set(m_reverse_effects->isChecked());
 	g_cfg_logitech_g27.ffb_direction_type.set(static_cast<g27_ffb_direction_type>(m_ffb_direction_type->currentData().toInt()));
 	g_cfg_logitech_g27.compatibility_limit.set(m_compatibility_limit->currentData().toInt());
@@ -600,6 +603,9 @@ void emulated_logitech_g27_settings_dialog::load_ui_state_from_config()
 	}
 
 	m_enabled->setChecked(g_cfg_logitech_g27.enabled.get());
+	m_wheel_model->setCurrentIndex(g_cfg_logitech_g27.t500rs.get() ? 1 : 0);
+	m_t500rs_protocol->setCurrentIndex(static_cast<int>(g_cfg_logitech_g27.t500rs_protocol.get()));
+	m_t500rs_host_range->setValue(static_cast<int>(g_cfg_logitech_g27.t500rs_host_range.get()));
 	m_reverse_effects->setChecked(g_cfg_logitech_g27.reverse_effects.get());
 	m_ffb_direction_type->setCurrentIndex(m_ffb_direction_type->findData(static_cast<int>(g_cfg_logitech_g27.ffb_direction_type.get())));
 	m_compatibility_limit->setCurrentIndex(4 - g_cfg_logitech_g27.compatibility_limit.get());
@@ -612,7 +618,7 @@ emulated_logitech_g27_settings_dialog::emulated_logitech_g27_settings_dialog(QWi
 	: QDialog(parent)
 {
 	setObjectName("emulated_logitech_g27_settings_dialog");
-	setWindowTitle(tr("Configure Emulated Logitech G27 Wheel"));
+	setWindowTitle(tr("Configure Emulated Wheel"));
 	setAttribute(Qt::WA_DeleteOnClose);
 	setAttribute(Qt::WA_StyledBackground);
 	setModal(true);
@@ -651,7 +657,7 @@ emulated_logitech_g27_settings_dialog::emulated_logitech_g27_settings_dialog(QWi
 		}
 	});
 
-	QLabel* warning = new QLabel(tr("Warning: Force feedback output were meant for Logitech G27, on stronger wheels please adjust force strength accordingly in your wheel software."), this);
+	QLabel* warning = new QLabel(tr("Warning: Force feedback is scaled for consumer wheels. Adjust force strength in your wheel software, especially on stronger wheels."), this);
 	warning->setStyleSheet(QString("color: %0;").arg(gui::utils::get_label_color("emulated_logitech_g27_warning_label", Qt::red, Qt::red).name()));
 	warning->setWordWrap(true);
 	v_layout->addWidget(warning);
@@ -662,6 +668,31 @@ emulated_logitech_g27_settings_dialog::emulated_logitech_g27_settings_dialog(QWi
 
 	m_enabled = new QCheckBox(tr("Enabled (requires game restart)"), this);
 	v_layout->addWidget(m_enabled);
+
+	auto* model_layout = new QHBoxLayout;
+	model_layout->addWidget(new QLabel(tr("Emulated wheel (requires game restart):"), this));
+	m_wheel_model = new QComboBox(this);
+	m_wheel_model->addItem(tr("Logitech G27 / Driving Force"), false);
+	m_wheel_model->addItem(tr("Thrustmaster T500RS (experimental)"), true);
+	m_wheel_model->setToolTip(tr("T500RS uses the same input and force-feedback mappings below.\nExtra Logitech dial, LED and H-pattern shifter mappings are not part of the T500RS base.\nGT5/GT6 compatibility has not yet been verified."));
+	model_layout->addWidget(m_wheel_model);
+	v_layout->addLayout(model_layout);
+	auto* protocol_layout = new QHBoxLayout;
+	protocol_layout->addWidget(new QLabel(tr("T500RS protocol (requires game restart):"), this));
+	m_t500rs_protocol = new QComboBox(this);
+	m_t500rs_protocol->addItem(tr("Captured Windows firmware (default)"), 0);
+	m_t500rs_protocol->addItem(tr("hid-tmff2 reference driver"), 1);
+	m_t500rs_protocol->setToolTip(tr("The archived Windows USB captures and experimental Linux driver disagree on envelope, timing and condition scaling.\nStart with the captured Windows format. The alternative supports the Linux driver's streamed periodic/ramp force protocol."));
+	protocol_layout->addWidget(m_t500rs_protocol);
+	v_layout->addLayout(protocol_layout);
+	auto* range_layout = new QHBoxLayout;
+	range_layout->addWidget(new QLabel(tr("Host wheel rotation range (T500RS):"), this));
+	m_t500rs_host_range = new QSpinBox(this);
+	m_t500rs_host_range->setRange(40, 1080);
+	m_t500rs_host_range->setSuffix(tr(" degrees"));
+	m_t500rs_host_range->setToolTip(tr("Match the range configured in your physical wheel driver.\nGuest range commands scale the steering input in software; they cannot change the physical wheel's stops through SDL."));
+	range_layout->addWidget(m_t500rs_host_range);
+	v_layout->addLayout(range_layout);
 
 	m_reverse_effects = new QCheckBox(tr("Reverse force feedback effects"), this);
 	v_layout->addWidget(m_reverse_effects);
@@ -689,6 +720,18 @@ emulated_logitech_g27_settings_dialog::emulated_logitech_g27_settings_dialog(QWi
 	m_compatibility_limit->addItem(tr("Driving Force Pro"), static_cast<u8>(logitech_personality::driving_force_pro));
 	compat_layout->addWidget(m_compatibility_limit);
 	v_layout->addLayout(compat_layout);
+	connect(m_wheel_model, &QComboBox::currentIndexChanged, this, [this, compatibility_label](int index)
+	{
+		m_compatibility_limit->setEnabled(index == 0);
+		compatibility_label->setEnabled(index == 0);
+		m_t500rs_protocol->setEnabled(index == 1);
+		m_t500rs_host_range->setEnabled(index == 1);
+		m_ffb_gain->setEnabled(index == 0);
+		m_steering_deadzone->setEnabled(index == 0);
+		m_steering_smoothing->setEnabled(index == 0);
+	});
+	m_t500rs_protocol->setEnabled(false);
+	m_t500rs_host_range->setEnabled(false);
 
 	QHBoxLayout* ffb_gain_layout = new QHBoxLayout(this);
 	ffb_gain_layout->setContentsMargins(0, 0, 0, 0);
@@ -932,12 +975,15 @@ void emulated_logitech_g27_settings_dialog::set_enable(bool enable)
 	}
 
 	m_enabled->setEnabled(enable);
+	m_wheel_model->setEnabled(enable);
+	m_t500rs_protocol->setEnabled(enable && m_wheel_model->currentIndex() == 1);
+	m_t500rs_host_range->setEnabled(enable && m_wheel_model->currentIndex() == 1);
+	m_compatibility_limit->setEnabled(enable && m_wheel_model->currentIndex() == 0);
 	m_reverse_effects->setEnabled(enable);
 	m_ffb_direction_type->setEnabled(enable);
-	m_compatibility_limit->setEnabled(enable);
-	m_ffb_gain->setEnabled(enable);
-	m_steering_deadzone->setEnabled(enable);
-	m_steering_smoothing->setEnabled(enable);
+	m_ffb_gain->setEnabled(enable && m_wheel_model->currentIndex() == 0);
+	m_steering_deadzone->setEnabled(enable && m_wheel_model->currentIndex() == 0);
+	m_steering_smoothing->setEnabled(enable && m_wheel_model->currentIndex() == 0);
 
 	m_ffb_device->set_enable(enable);
 	m_led_device->set_enable(enable);

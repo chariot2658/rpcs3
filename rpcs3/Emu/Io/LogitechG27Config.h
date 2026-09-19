@@ -134,6 +134,11 @@ public:
 	// Direct drive wheels benefit from e.g. 70-85 to damp high-frequency shimmy.
 	cfg::uint<0, 95> steering_smoothing{this, "steering_smoothing", 0};
 
+	// One shared host mapping, with mutually exclusive guest USB identities.
+	cfg::_bool t500rs{this, "t500rs", false};
+	// 0: captured Windows packets; 1: hid-tmff2 PR #223 encoder.
+	cfg::uint<0, 1> t500rs_protocol{this, "t500rs_protocol", 0};
+	cfg::uint<40, 1080> t500rs_host_range{this, "t500rs_host_range", 1080};
 	cfg::_bool enabled{this, "enabled", false};
 
 	emulated_logitech_g27_config();

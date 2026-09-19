@@ -1546,7 +1546,7 @@
   </action>
   <action name="confLogitechG27Act">
    <property name="text">
-    <string>Logitech G27 Wheel</string>
+    <string>Emulated Wheel (Logitech / Thrustmaster)</string>
    </property>
   </action>
   <action name="actionBasic_Mouse">

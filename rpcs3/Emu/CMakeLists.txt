@@ -450,6 +450,8 @@ target_sources(rpcs3_emu PRIVATE
     Io/usb_microphone.cpp
     Io/usb_vfs.cpp
     Io/usio.cpp
+    Io/ThrustmasterT500RS.cpp
+    Io/ThrustmasterT500RSSDL.cpp
     Io/LogitechG27.cpp
     Io/LogitechG27Config.cpp
 )

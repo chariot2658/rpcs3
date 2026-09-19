@@ -58,6 +58,9 @@ private:
 	QLabel* m_state_text = nullptr;
 
 	QCheckBox* m_enabled = nullptr;
+	QComboBox* m_wheel_model = nullptr;
+	QComboBox* m_t500rs_protocol = nullptr;
+	QSpinBox* m_t500rs_host_range = nullptr;
 	QCheckBox* m_reverse_effects = nullptr;
 	QComboBox* m_ffb_direction_type = nullptr;
 	QComboBox* m_compatibility_limit = nullptr;

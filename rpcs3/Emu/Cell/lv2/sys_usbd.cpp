@@ -238,7 +238,11 @@ private:
 		{0x044F, 0xb655, 0xb655, "Thrustmaster FGT Rumble 3-in-1", nullptr, nullptr},
 		{0x044F, 0xB65A, 0xB65A, "Thrustmaster F430", nullptr, nullptr},
 		{0x044F, 0xB65D, 0xB65D, "Thrustmaster FFB", nullptr, nullptr},
+#ifdef HAVE_SDL3
+		{0x044F, 0xB65E, 0xB65E, "Thrustmaster TRS", &usb_device_logitech_g27::get_num_t500rs_devices, &usb_device_logitech_g27::make_t500rs_instance},
+#else
 		{0x044F, 0xB65E, 0xB65E, "Thrustmaster TRS", nullptr, nullptr},
+#endif
 		{0x044F, 0xB660, 0xB660, "Thrustmaster T500 RS Gear Shift", nullptr, nullptr},
 
 		// GT6

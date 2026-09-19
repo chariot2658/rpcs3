@@ -309,12 +309,14 @@ void usb_device_logitech_g27::set_personality(logitech_personality personality, 
 	}
 }
 
-usb_device_logitech_g27::usb_device_logitech_g27(u32 controller_index, const std::array<u8, 7>& location)
+usb_device_logitech_g27::usb_device_logitech_g27(u32 controller_index, const std::array<u8, 7>& location, bool t500rs)
 	: usb_device_emulated(location), m_controller_index(controller_index)
 {
-	set_personality(logitech_personality::driving_force_ex);
-
 	g_cfg_logitech_g27.load();
+	if (t500rs)
+		init_t500rs();
+	else
+		set_personality(logitech_personality::driving_force_ex);
 
 	m_default_spring_effect.type = SDL_HAPTIC_SPRING;
 	m_default_spring_effect.condition.direction = make_steering_direction();
@@ -335,9 +337,10 @@ usb_device_logitech_g27::usb_device_logitech_g27(u32 controller_index, const std
 	// Initial refresh before the usb handler connects the device, so is_attachable() already reflects the physical state
 	sdl_refresh();
 
-	m_house_keeping_thread = std::make_unique<named_thread<std::function<void()>>>("Logitech G27", [this]()
+	m_house_keeping_thread = std::make_unique<named_thread<std::function<void()>>>(t500rs ? "Thrustmaster T500RS" : "Logitech G27", [this]()
 	{
 		bool last_steering_device_present = m_steering_device_present;
+		u64 next_refresh = 0;
 
 		while (thread_ctrl::state() != thread_state::aborting)
 		{
@@ -345,7 +348,11 @@ usb_device_logitech_g27::usb_device_logitech_g27(u32 controller_index, const std
 			// so this is the only pump that lets SDL notice the wheel being plugged back in
 			sdl_instance::get_instance().pump_events();
 
-			sdl_refresh();
+			if (get_timestamp() >= next_refresh)
+			{
+				sdl_refresh();
+				next_refresh = get_timestamp() + 1'000'000;
+			}
 
 			// Mirror the physical presence of the mapped steering device on the emulated usb bus, so games
 			// fall back to the pad when the real wheel is not connected instead of reading a phantom wheel
@@ -356,6 +363,12 @@ usb_device_logitech_g27::usb_device_logitech_g27(u32 controller_index, const std
 				last_steering_device_present = steering_device_present;
 			}
 
+			if (m_personality == logitech_personality::t500rs)
+			{
+				update_t500rs_haptics();
+				thread_ctrl::wait_for(4'000);
+				continue;
+			}
 			thread_ctrl::wait_for(1'000'000);
 
 			std::unique_lock lock(g_cfg_logitech_g27.m_mutex);
@@ -401,6 +414,11 @@ usb_device_logitech_g27::~usb_device_logitech_g27()
 		const std::lock_guard lock(m_sdl_handles_mutex);
 		if (m_haptic_handle)
 		{
+			if (m_personality == logitech_personality::t500rs)
+			{
+				SDL_StopHapticEffects(m_haptic_handle);
+				SDL_SetHapticAutocenter(m_haptic_handle, 0);
+			}
 			SDL_CloseHaptic(m_haptic_handle);
 			m_haptic_handle = nullptr;
 		}
@@ -415,11 +433,30 @@ std::shared_ptr<usb_device> usb_device_logitech_g27::make_instance(u32 controlle
 
 u16 usb_device_logitech_g27::get_num_emu_devices()
 {
-	return 1;
+	g_cfg_logitech_g27.load();
+	const std::lock_guard lock(g_cfg_logitech_g27.m_mutex);
+	return g_cfg_logitech_g27.enabled.get() && !g_cfg_logitech_g27.t500rs.get() ? 1 : 0;
+}
+
+u16 usb_device_logitech_g27::get_num_t500rs_devices()
+{
+	g_cfg_logitech_g27.load();
+	const std::lock_guard lock(g_cfg_logitech_g27.m_mutex);
+	return g_cfg_logitech_g27.enabled.get() && g_cfg_logitech_g27.t500rs.get() ? 1 : 0;
+}
+
+std::shared_ptr<usb_device> usb_device_logitech_g27::make_t500rs_instance(u32 controller_index, const std::array<u8, 7>& location)
+{
+	return std::make_shared<usb_device_logitech_g27>(controller_index, location, true);
 }
 
 void usb_device_logitech_g27::control_transfer(u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, u16 wLength, u32 buf_size, u8* buf, UsbTransfer* transfer)
 {
+	if (m_personality == logitech_personality::t500rs)
+	{
+		control_t500rs(bmRequestType, bRequest, wValue, wIndex, wLength, buf_size, buf, transfer);
+		return;
+	}
 	logitech_g27_log.notice("control transfer bmRequestType %02x, bRequest %02x, wValue %04x, wIndex %04x, wLength %04x, %s", bmRequestType, bRequest, wValue, wIndex, wLength, fmt::buf_to_hexstring(buf, buf_size));
 
 	usb_device_emulated::control_transfer(bmRequestType, bRequest, wValue, wIndex, wLength, buf_size, buf, transfer);
@@ -520,17 +557,38 @@ void usb_device_logitech_g27::sdl_refresh()
 {
 	std::unique_lock lock(g_cfg_logitech_g27.m_mutex);
 
-	m_mapping = get_runtime_mapping();
-
-	m_reverse_effects = g_cfg_logitech_g27.reverse_effects.get();
-	m_ffb_gain = g_cfg_logitech_g27.ffb_gain.get();
-	m_steering_deadzone = g_cfg_logitech_g27.steering_deadzone.get();
-	m_steering_smoothing = g_cfg_logitech_g27.steering_smoothing.get();
+	const auto mapping = get_runtime_mapping();
+	const bool reverse_effects = g_cfg_logitech_g27.reverse_effects.get();
+	const u32 ffb_gain = static_cast<u32>(g_cfg_logitech_g27.ffb_gain.get());
+	const u32 steering_deadzone = static_cast<u32>(g_cfg_logitech_g27.steering_deadzone.get());
+	const u32 steering_smoothing = static_cast<u32>(g_cfg_logitech_g27.steering_smoothing.get());
+	const auto direction = make_steering_direction();
+	const u16 host_range = static_cast<u16>(g_cfg_logitech_g27.t500rs_host_range.get());
 
 	const u64 ffb_device_type_id = g_cfg_logitech_g27.ffb_device_type_id.get();
 	const u64 led_device_type_id = g_cfg_logitech_g27.led_device_type_id.get();
 
 	lock.unlock();
+
+	const std::lock_guard handles_lock(m_sdl_handles_mutex);
+	if (m_personality == logitech_personality::t500rs &&
+		(m_t500rs_direction.type != direction.type || m_t500rs_direction.dir[0] != direction.dir[0]))
+	{
+		if (m_haptic_handle)
+		{
+			for (auto& slot : m_t500rs_host_slots)
+				if (slot.id >= 0) SDL_DestroyHapticEffect(m_haptic_handle, slot.id);
+			if (m_t500rs_autocenter_id >= 0) SDL_DestroyHapticEffect(m_haptic_handle, m_t500rs_autocenter_id);
+		}
+		invalidate_t500rs_haptics();
+	}
+	m_mapping = mapping;
+	m_reverse_effects = reverse_effects;
+	m_ffb_gain = ffb_gain;
+	m_steering_deadzone = steering_deadzone;
+	m_steering_smoothing = steering_smoothing;
+	m_t500rs_direction = direction;
+	m_t500rs_host_range = host_range;
 
 	SDL_Joystick* new_led_joystick_handle = nullptr;
 	SDL_Haptic* new_haptic_handle = nullptr;
@@ -600,11 +658,15 @@ void usb_device_logitech_g27::sdl_refresh()
 	// if we should touch the mutex
 	if (joysticks_changed || haptic_changed || led_joystick_changed)
 	{
-		const std::lock_guard<std::mutex> lock(m_sdl_handles_mutex);
 		if (haptic_changed)
 		{
 			if (m_haptic_handle)
 			{
+				if (m_personality == logitech_personality::t500rs)
+				{
+					SDL_StopHapticEffects(m_haptic_handle);
+					SDL_SetHapticAutocenter(m_haptic_handle, 0);
+				}
 				SDL_CloseHaptic(m_haptic_handle);
 				m_haptic_handle = nullptr;
 			}
@@ -615,6 +677,7 @@ void usb_device_logitech_g27::sdl_refresh()
 			}
 			m_default_spring_effect_id = -1;
 			m_haptic_handle = new_haptic_handle;
+			invalidate_t500rs_haptics();
 		}
 		if (led_joystick_changed)
 		{
@@ -642,9 +705,15 @@ void usb_device_logitech_g27::sdl_refresh()
 
 	{
 		// Cache the presence of the mapped steering device for is_attachable()
-		const std::lock_guard<std::mutex> handles_lock(m_sdl_handles_mutex);
 		const auto steering_joysticks = m_joysticks.find(m_mapping.steering.device_type_id);
-		m_steering_device_present = steering_joysticks != m_joysticks.end() && !steering_joysticks->second.empty();
+		const bool present = steering_joysticks != m_joysticks.end() && !steering_joysticks->second.empty();
+		if (m_personality == logitech_personality::t500rs && m_steering_device_present && !present)
+		{
+			// USB unplug/replug begins a new device session; never replay stale torque.
+			const std::lock_guard protocol_lock(m_t500rs_mutex);
+			m_t500rs.reset();
+		}
+		m_steering_device_present = present;
 	}
 }
 
@@ -1124,6 +1193,44 @@ static u8 sdl_to_logitech_g27_pedal(const std::map<u64, std::vector<SDL_Joystick
 	return unsigned_avg * 0xFF / 0xFFFF;
 }
 
+t500rs::input_report usb_device_logitech_g27::input_t500rs() const
+{
+	t500rs::input state{};
+	if (!is_input_allowed())
+		return t500rs::make_input_report(state);
+	u16 range;
+	{
+		const std::lock_guard lock(m_t500rs_mutex);
+		range = m_t500rs.range;
+	}
+	const std::lock_guard lock(m_sdl_handles_mutex);
+	const auto axis = [this](const sdl_mapping& mapping, bool centered)
+	{
+		const auto it = m_joysticks.find(mapping.device_type_id);
+		if (it == m_joysticks.end() || it->second.empty())
+			return centered ? 0 : 32767; // Released pedals even if their mapping is inverted.
+		return static_cast<int>(fetch_sdl_axis_avg(m_joysticks, mapping, centered));
+	};
+	const auto button = [this](const sdl_mapping& mapping)
+	{
+		const auto it = m_joysticks.find(mapping.device_type_id);
+		return it != m_joysticks.end() && !it->second.empty() && sdl_to_logitech_g27_button(m_joysticks, mapping);
+	};
+	state.steering = static_cast<u16>(std::clamp(axis(m_mapping.steering, true) * m_t500rs_host_range / range, -32768, 32767) + 32768);
+	state.throttle = static_cast<u16>((axis(m_mapping.throttle, false) + 32768) * 1023 / 65535);
+	state.brake = static_cast<u16>((axis(m_mapping.brake, false) + 32768) * 1023 / 65535);
+	state.clutch = static_cast<u16>((axis(m_mapping.clutch, false) + 32768) * 1023 / 65535);
+	const std::array buttons{&m_mapping.square, &m_mapping.cross, &m_mapping.circle, &m_mapping.triangle,
+		&m_mapping.shift_up, &m_mapping.shift_down, &m_mapping.r2, &m_mapping.l2,
+		&m_mapping.select, &m_mapping.start, &m_mapping.l3, &m_mapping.r3, &m_mapping.ps};
+	for (std::size_t i = 0; i < buttons.size(); ++i)
+		if (button(*buttons[i])) state.buttons |= static_cast<u16>(1u << i);
+	const bool up = button(m_mapping.up), down = button(m_mapping.down);
+	const bool left = button(m_mapping.left), right = button(m_mapping.right);
+	state.hat = hat_components_to_logitech_g27_hat(up && !down, down && !up, left && !right, right && !left);
+	return t500rs::make_input_report(state);
+}
+
 void usb_device_logitech_g27::transfer_dfex(u32 buf_size, u8* buf, UsbTransfer* transfer) const
 {
 	DFEX_data data{};
@@ -1340,6 +1447,11 @@ void usb_device_logitech_g27::transfer_g27(u32 buf_size, u8* buf, UsbTransfer* t
 
 void usb_device_logitech_g27::interrupt_transfer(u32 buf_size, u8* buf, u32 endpoint, UsbTransfer* transfer)
 {
+	if (m_personality == logitech_personality::t500rs)
+	{
+		interrupt_t500rs(buf_size, buf, endpoint, transfer);
+		return;
+	}
 	transfer->fake = true;
 	transfer->expected_result = HC_CC_NOERR;
 	// G29 in G27 mode polls at 500 hz, let's try a delay of 1ms for now, for wheels that updates that fast
@@ -1367,6 +1479,7 @@ void usb_device_logitech_g27::interrupt_transfer(u32 buf_size, u8* buf, u32 endp
 		case logitech_personality::g27:
 			transfer_g27(buf_size, buf, transfer);
 			break;
+		case logitech_personality::t500rs:
 		case logitech_personality::invalid:
 			fmt::throw_exception("unreachable");
 		}

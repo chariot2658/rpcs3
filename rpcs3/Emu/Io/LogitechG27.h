@@ -3,6 +3,8 @@
 #include "Emu/Io/usb_device.h"
 #include "Utilities/Thread.h"
 #include "LogitechG27Config.h"
+#include "ThrustmasterT500RS.h"
+#include <set>
 
 #ifndef _MSC_VER
 #pragma GCC diagnostic push
@@ -23,6 +25,7 @@ enum class logitech_personality
 	g25,
 	driving_force_gt,
 	g27,
+	t500rs,
 	invalid,
 };
 
@@ -108,11 +111,13 @@ struct logitech_g27_sdl_mapping
 class usb_device_logitech_g27 : public usb_device_emulated
 {
 public:
-	usb_device_logitech_g27(u32 controller_index, const std::array<u8, 7>& location);
+	usb_device_logitech_g27(u32 controller_index, const std::array<u8, 7>& location, bool t500rs = false);
 	~usb_device_logitech_g27();
 
 	static std::shared_ptr<usb_device> make_instance(u32 controller_index, const std::array<u8, 7>& location);
 	static u16 get_num_emu_devices();
+	static u16 get_num_t500rs_devices();
+	static std::shared_ptr<usb_device> make_t500rs_instance(u32 controller_index, const std::array<u8, 7>& location);
 
 	void control_transfer(u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, u16 wLength, u32 buf_size, u8* buf, UsbTransfer* transfer) override;
 	void interrupt_transfer(u32 buf_size, u8* buf, u32 endpoint, UsbTransfer* transfer) override;
@@ -121,6 +126,13 @@ public:
 
 private:
 	void sdl_refresh();
+	void init_t500rs();
+	void control_t500rs(u8 request_type, u8 request, u16 value, u16 index, u16 length, u32 size, u8* data, UsbTransfer* transfer);
+	void interrupt_t500rs(u32 size, u8* data, u32 endpoint, UsbTransfer* transfer);
+	t500rs::input_report input_t500rs() const;
+	t500rs::result output_t500rs(std::span<const u8> data);
+	void update_t500rs_haptics();
+	void invalidate_t500rs_haptics();
 	void set_personality(logitech_personality personality, bool reconnect = false);
 	void transfer_dfex(u32 buf_size, u8* buf, UsbTransfer* transfer) const;
 	void transfer_dfp(u32 buf_size, u8* buf, UsbTransfer* transfer) const;
@@ -131,6 +143,30 @@ private:
 	u16 sdl_to_logitech_g27_steering_filtered(const std::map<u64, std::vector<SDL_Joystick*>>& joysticks, const sdl_mapping& mapping) const;
 	s16 apply_steering_filter(s16 raw_value) const;
 	SDL_HapticEffect apply_ffb_gain(const SDL_HapticEffect& effect) const;
+
+	// USB callbacks only hold this mutex for parsing/snapshotting. Slow host FFB
+	// calls run on the housekeeping thread under m_sdl_handles_mutex.
+	mutable std::mutex m_t500rs_mutex;
+	t500rs::protocol m_t500rs;
+	struct t500rs_host_slot
+	{
+		int id = -1;
+		t500rs::effect last{};
+		u64 generation = 0;
+		u64 starts = 0;
+		bool playing = false;
+		bool failed = false;
+	};
+	std::array<t500rs_host_slot, 16> m_t500rs_host_slots{};
+	int m_t500rs_gain = -1;
+	int m_t500rs_autocenter = -1;
+	int m_t500rs_autocenter_id = -1;
+	bool m_t500rs_muted = false;
+	u16 m_t500rs_host_range = 1080;
+	SDL_HapticDirection m_t500rs_direction{};
+	std::array<u8, 256> m_t500rs_idle{};
+	u8 m_t500rs_hid_protocol = 1;
+	std::set<u32> m_t500rs_warnings;
 
 	u32 m_controller_index = 0;
 
