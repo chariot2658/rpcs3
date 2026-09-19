@@ -549,6 +549,9 @@ void emulated_logitech_g27_settings_dialog::save_ui_state_to_config()
 	g_cfg_logitech_g27.reverse_effects.set(m_reverse_effects->isChecked());
 	g_cfg_logitech_g27.ffb_direction_type.set(static_cast<g27_ffb_direction_type>(m_ffb_direction_type->currentData().toInt()));
 	g_cfg_logitech_g27.compatibility_limit.set(m_compatibility_limit->currentData().toInt());
+	g_cfg_logitech_g27.ffb_gain.set(static_cast<u64>(m_ffb_gain->value()));
+	g_cfg_logitech_g27.steering_deadzone.set(static_cast<u64>(m_steering_deadzone->value()));
+	g_cfg_logitech_g27.steering_smoothing.set(static_cast<u64>(m_steering_smoothing->value()));
 
 	if (m_ffb_device->get_device_choice() == mapping_device::NONE)
 	{
@@ -600,6 +603,9 @@ void emulated_logitech_g27_settings_dialog::load_ui_state_from_config()
 	m_reverse_effects->setChecked(g_cfg_logitech_g27.reverse_effects.get());
 	m_ffb_direction_type->setCurrentIndex(m_ffb_direction_type->findData(static_cast<int>(g_cfg_logitech_g27.ffb_direction_type.get())));
 	m_compatibility_limit->setCurrentIndex(4 - g_cfg_logitech_g27.compatibility_limit.get());
+	m_ffb_gain->setValue(static_cast<int>(g_cfg_logitech_g27.ffb_gain.get()));
+	m_steering_deadzone->setValue(static_cast<int>(g_cfg_logitech_g27.steering_deadzone.get()));
+	m_steering_smoothing->setValue(static_cast<int>(g_cfg_logitech_g27.steering_smoothing.get()));
 }
 
 emulated_logitech_g27_settings_dialog::emulated_logitech_g27_settings_dialog(QWidget* parent)
@@ -683,6 +689,39 @@ emulated_logitech_g27_settings_dialog::emulated_logitech_g27_settings_dialog(QWi
 	m_compatibility_limit->addItem(tr("Driving Force Pro"), static_cast<u8>(logitech_personality::driving_force_pro));
 	compat_layout->addWidget(m_compatibility_limit);
 	v_layout->addLayout(compat_layout);
+
+	QHBoxLayout* ffb_gain_layout = new QHBoxLayout(this);
+	ffb_gain_layout->setContentsMargins(0, 0, 0, 0);
+	QLabel* ffb_gain_label = new QLabel(tr("Force feedback gain (%):"), this);
+	ffb_gain_layout->addWidget(ffb_gain_label);
+	m_ffb_gain = new QSpinBox(this);
+	m_ffb_gain->setRange(0, 200);
+	m_ffb_gain->setSingleStep(5);
+	m_ffb_gain->setToolTip(tr("Scales all force feedback strengths. 100 = game output unchanged.\nDirect drive wheels are much stronger than a G27: try 50-70 to reduce straight-line oscillation.\n0 disables force output while keeping input working."));
+	ffb_gain_layout->addWidget(m_ffb_gain);
+	v_layout->addLayout(ffb_gain_layout);
+
+	QHBoxLayout* deadzone_layout = new QHBoxLayout(this);
+	deadzone_layout->setContentsMargins(0, 0, 0, 0);
+	QLabel* deadzone_label = new QLabel(tr("Steering deadzone (0-10000):"), this);
+	deadzone_layout->addWidget(deadzone_label);
+	m_steering_deadzone = new QSpinBox(this);
+	m_steering_deadzone->setRange(0, 10000);
+	m_steering_deadzone->setSingleStep(100);
+	m_steering_deadzone->setToolTip(tr("Ignores small steering inputs around center (SDL axis units, max 32767).\nKills sensor noise / hand tremor that feeds the FFB loop and starts shimmy on straights.\nDirect drive wheels usually need e.g. 500-1500. 0 = off."));
+	deadzone_layout->addWidget(m_steering_deadzone);
+	v_layout->addLayout(deadzone_layout);
+
+	QHBoxLayout* smoothing_layout = new QHBoxLayout(this);
+	smoothing_layout->setContentsMargins(0, 0, 0, 0);
+	QLabel* smoothing_label = new QLabel(tr("Steering smoothing (%):"), this);
+	smoothing_layout->addWidget(smoothing_label);
+	m_steering_smoothing = new QSpinBox(this);
+	m_steering_smoothing->setRange(0, 95);
+	m_steering_smoothing->setSingleStep(5);
+	m_steering_smoothing->setToolTip(tr("Low-pass filter on steering input. 0 = off.\nAttenuates high-frequency jitter / oscillation feedback at the cost of a little latency.\nDirect drive wheels usually need e.g. 70-85 if oscillation persists even at low gain."));
+	smoothing_layout->addWidget(m_steering_smoothing);
+	v_layout->addLayout(smoothing_layout);
 
 	m_state_text = new QLabel(DEFAULT_STATUS, this);
 	v_layout->addWidget(m_state_text);
@@ -895,6 +934,10 @@ void emulated_logitech_g27_settings_dialog::set_enable(bool enable)
 	m_enabled->setEnabled(enable);
 	m_reverse_effects->setEnabled(enable);
 	m_ffb_direction_type->setEnabled(enable);
+	m_compatibility_limit->setEnabled(enable);
+	m_ffb_gain->setEnabled(enable);
+	m_steering_deadzone->setEnabled(enable);
+	m_steering_smoothing->setEnabled(enable);
 
 	m_ffb_device->set_enable(enable);
 	m_led_device->set_enable(enable);
