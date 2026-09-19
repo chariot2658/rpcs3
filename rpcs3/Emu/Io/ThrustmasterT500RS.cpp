@@ -64,7 +64,7 @@ std::span<const byte> vendor_reply(byte request)
 
 void protocol::stop_all()
 {
-	for (auto& s : slots)
+	for (auto& s : effect_slots)
 		s.playing = false;
 	autocenter_enabled = false;
 }
@@ -118,7 +118,7 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 	{
 	case 0x01:
 	{
-		if (p[1] >= slots.size() || p[3] != 0x40)
+		if (p[1] >= effect_slots.size() || p[3] != 0x40)
 			return result::malformed;
 		const bool periodic = p[2] >= 0x20 && p[2] <= 0x24;
 		if (p[2] != 0 && p[2] != 0x40 && p[2] != 0x41 && !periodic)
@@ -130,7 +130,7 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 		const auto envelope = static_cast<byte>(le16(&p[11]));
 		if (parameter == envelope)
 			return result::malformed;
-		auto& s = slots[p[1]];
+		auto& s = effect_slots[p[1]];
 		const bool changed = !s.declared || s.type != p[2] || s.parameter != parameter || s.envelope != envelope;
 		s.declared = true;
 		s.type = p[2];
@@ -187,9 +187,9 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 		}
 	case 0x41:
 	{
-		if (p[1] >= slots.size())
+		if (p[1] >= effect_slots.size())
 			return result::malformed;
-		auto& s = slots[p[1]];
+		auto& s = effect_slots[p[1]];
 		if (p[2] == 0)
 		{
 			s.playing = false;
@@ -223,9 +223,9 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 effect protocol::decode(std::size_t index, bool reverse) const
 {
 	effect out{};
-	if (index >= slots.size() || !slots[index].declared)
+	if (index >= effect_slots.size() || !effect_slots[index].declared)
 		return out;
-	const auto& s = slots[index];
+	const auto& s = effect_slots[index];
 	const auto& param = m_parameters[s.parameter];
 	const auto& p = param.data;
 	const auto& env = m_envelopes[s.envelope];

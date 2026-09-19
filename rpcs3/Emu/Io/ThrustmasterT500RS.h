@@ -100,7 +100,7 @@ public:
 	bool pop_reply(input_report& report);
 	bool enable_input_reporting() { return queue_reply(input_report{2, 0xff, 0x3f}); }
 	input_report last_identification{};
-	std::array<slot, 16> slots{};
+	std::array<slot, 16> effect_slots{};
 	dialect format;
 	byte gain = 255;
 	bool autocenter_enabled = false;
