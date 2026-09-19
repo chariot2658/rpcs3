@@ -316,9 +316,9 @@ void usb_device_logitech_g27::update_t500rs_haptics()
 	}
 
 	const u64 now = get_timestamp();
-	for (std::size_t i = 0; i < snapshot.slots.size(); ++i)
+	for (std::size_t i = 0; i < snapshot.effect_slots.size(); ++i)
 	{
-		const auto& s = snapshot.slots[i];
+		const auto& s = snapshot.effect_slots[i];
 		auto& h = m_t500rs_host_slots[i];
 		auto effect = snapshot.decode(i, m_reverse_effects);
 		const bool expired = effect.length != SDL_HAPTIC_INFINITY && s.playing && now >= s.started_at_us &&
