@@ -122,6 +122,17 @@ public:
 	cfg::uint<0, 4> compatibility_limit{this, "compatibility_limit", 4};
 	cfg::uint<0, 0xFFFFFFFFFFFFFFFF> ffb_device_type_id{this, "ffb_device_type_id", 0};
 	cfg::uint<0, 0xFFFFFFFFFFFFFFFF> led_device_type_id{this, "led_device_type_id", 0};
+	// Percent of the game-requested force to actually output. Lower this on
+	// strong direct drive wheels (e.g. 50-70) to reduce straight-line oscillation.
+	cfg::uint<0, 200> ffb_gain{this, "ffb_gain", 100};
+	// Steering input deadzone in SDL axis units (0-32767). Samples with
+	// |value| <= deadzone report centered steering. Direct drive wheels
+	// benefit from e.g. 500-1500 to kill center noise that feeds the FFB loop.
+	cfg::uint<0, 10000> steering_deadzone{this, "steering_deadzone", 0};
+	// Steering low-pass smoothing in percent (0 = off, 95 = max). The filter is
+	// filtered = (prev * smoothing + raw * (100 - smoothing)) / 100 per report.
+	// Direct drive wheels benefit from e.g. 70-85 to damp high-frequency shimmy.
+	cfg::uint<0, 95> steering_smoothing{this, "steering_smoothing", 0};
 
 	cfg::_bool enabled{this, "enabled", false};
 
