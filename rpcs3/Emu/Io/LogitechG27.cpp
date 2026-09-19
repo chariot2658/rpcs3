@@ -523,6 +523,9 @@ void usb_device_logitech_g27::sdl_refresh()
 	m_mapping = get_runtime_mapping();
 
 	m_reverse_effects = g_cfg_logitech_g27.reverse_effects.get();
+	m_ffb_gain = g_cfg_logitech_g27.ffb_gain.get();
+	m_steering_deadzone = g_cfg_logitech_g27.steering_deadzone.get();
+	m_steering_smoothing = g_cfg_logitech_g27.steering_smoothing.get();
 
 	const u64 ffb_device_type_id = g_cfg_logitech_g27.ffb_device_type_id.get();
 	const u64 led_device_type_id = g_cfg_logitech_g27.led_device_type_id.get();
@@ -982,11 +985,136 @@ static bool sdl_to_logitech_g27_button(const std::map<u64, std::vector<SDL_Joyst
 	return pressed;
 }
 
-static u16 sdl_to_logitech_g27_steering(const std::map<u64, std::vector<SDL_Joystick*>>& joysticks, const sdl_mapping& mapping)
+s16 usb_device_logitech_g27::apply_steering_filter(s16 raw_value) const
+{
+	s16 value = raw_value;
+
+	// 1. Deadzone around center: kills sensor noise / hand tremor that would
+	// otherwise feed the game FFB loop and start a straight-line shimmy.
+	// Rescale the remaining range so full lock is still reachable.
+	if (m_steering_deadzone > 0)
+	{
+		const s32 deadzone = static_cast<s32>(m_steering_deadzone);
+		const s32 abs_value = std::abs(static_cast<s32>(value));
+		if (abs_value <= deadzone)
+		{
+			value = 0;
+		}
+		else
+		{
+			constexpr s32 max_range = 0x7FFF;
+			if (deadzone < max_range)
+			{
+				const s32 sign = (value > 0) ? 1 : -1;
+				const s32 rescaled = (abs_value - deadzone) * max_range / (max_range - deadzone);
+				value = static_cast<s16>(sign * rescaled);
+			}
+		}
+	}
+
+	// 2. Exponential moving average low-pass: attenuates high-frequency
+	// jitter / oscillation feedback while tracking intentional inputs with a
+	// small lag. Runs per interrupt report, so higher smoothing = lower cutoff.
+	if (m_steering_smoothing > 0)
+	{
+		if (!m_steering_filter_init)
+		{
+			m_filtered_steering = value;
+			m_steering_filter_init = true;
+		}
+		else
+		{
+			const s32 smoothing = static_cast<s32>(m_steering_smoothing); // 1-95
+			const s32 alpha = 100 - smoothing; // weight of the new sample
+			const s32 filtered = (static_cast<s32>(m_filtered_steering) * smoothing + static_cast<s32>(value) * alpha) / 100;
+			m_filtered_steering = static_cast<s16>(std::clamp<s32>(filtered, -0x8000, 0x7FFF));
+		}
+		value = m_filtered_steering;
+	}
+	else
+	{
+		// Keep the filter state warm so toggling smoothing on mid-drive
+		// does not cause a steering jump from a stale value.
+		m_filtered_steering = value;
+		m_steering_filter_init = true;
+	}
+
+	return value;
+}
+
+u16 usb_device_logitech_g27::sdl_to_logitech_g27_steering_filtered(const std::map<u64, std::vector<SDL_Joystick*>>& joysticks, const sdl_mapping& mapping) const
 {
 	const s16 avg = fetch_sdl_axis_avg(joysticks, mapping, true); // centered axis, neutral steering is the mid position
-	const u16 unsigned_avg = avg + 0x8000;
+	const s16 filtered = apply_steering_filter(avg);
+	const u16 unsigned_avg = static_cast<u16>(static_cast<s32>(filtered) + 0x8000);
 	return unsigned_avg * (0xFFFF >> 2) / 0xFFFF;
+}
+
+static inline s16 scale_ffb_level_s16(s16 value, u32 gain_percent)
+{
+	if (gain_percent == 100)
+		return value;
+	const s32 scaled = static_cast<s32>(value) * static_cast<s32>(gain_percent) / 100;
+	return static_cast<s16>(std::clamp<s32>(scaled, -0x8000, 0x7FFF));
+}
+
+static inline u16 scale_ffb_level_u16(u16 value, u32 gain_percent)
+{
+	if (gain_percent == 100)
+		return value;
+	const u32 scaled = static_cast<u32>(value) * gain_percent / 100;
+	return static_cast<u16>(std::min<u32>(scaled, 0xFFFF));
+}
+
+SDL_HapticEffect usb_device_logitech_g27::apply_ffb_gain(const SDL_HapticEffect& effect) const
+{
+	if (m_ffb_gain == 100)
+		return effect;
+
+	SDL_HapticEffect scaled = effect;
+	const u32 gain = m_ffb_gain;
+
+	switch (scaled.type)
+	{
+	case SDL_HAPTIC_CONSTANT:
+		scaled.constant.level = scale_ffb_level_s16(scaled.constant.level, gain);
+		scaled.constant.attack_level = scale_ffb_level_u16(scaled.constant.attack_level, gain);
+		scaled.constant.fade_level = scale_ffb_level_u16(scaled.constant.fade_level, gain);
+		break;
+	case SDL_HAPTIC_RAMP:
+		scaled.ramp.start = scale_ffb_level_s16(scaled.ramp.start, gain);
+		scaled.ramp.end = scale_ffb_level_s16(scaled.ramp.end, gain);
+		break;
+	case SDL_HAPTIC_SPRING:
+	case SDL_HAPTIC_DAMPER:
+	case SDL_HAPTIC_INERTIA:
+	case SDL_HAPTIC_FRICTION:
+		// NB: center/deadband are geometry, only scale strengths (sat/coeff)
+		for (int i = 0; i < 3; i++)
+		{
+			scaled.condition.right_sat[i] = scale_ffb_level_u16(scaled.condition.right_sat[i], gain);
+			scaled.condition.left_sat[i] = scale_ffb_level_u16(scaled.condition.left_sat[i], gain);
+			scaled.condition.right_coeff[i] = scale_ffb_level_s16(scaled.condition.right_coeff[i], gain);
+			scaled.condition.left_coeff[i] = scale_ffb_level_s16(scaled.condition.left_coeff[i], gain);
+		}
+		break;
+	default:
+		// Periodic effects (sine/square/triangle/sawtooth): scale wave amplitude.
+		// Unknown/unsupported types (leftright/custom) are left untouched since
+		// their union layout differs and the G27 path never generates them.
+		if (scaled.type == SDL_HAPTIC_SINE || scaled.type == SDL_HAPTIC_SQUARE ||
+		    scaled.type == SDL_HAPTIC_TRIANGLE || scaled.type == SDL_HAPTIC_SAWTOOTHUP ||
+		    scaled.type == SDL_HAPTIC_SAWTOOTHDOWN)
+		{
+			scaled.periodic.magnitude = scale_ffb_level_s16(scaled.periodic.magnitude, gain);
+			scaled.periodic.offset = scale_ffb_level_s16(scaled.periodic.offset, gain);
+			scaled.periodic.attack_level = scale_ffb_level_u16(scaled.periodic.attack_level, gain);
+			scaled.periodic.fade_level = scale_ffb_level_u16(scaled.periodic.fade_level, gain);
+		}
+		break;
+	}
+
+	return scaled;
 }
 
 static u8 sdl_to_logitech_g27_pedal(const std::map<u64, std::vector<SDL_Joystick*>>& joysticks, const sdl_mapping& mapping)
@@ -1021,7 +1149,7 @@ void usb_device_logitech_g27::transfer_dfex(u32 buf_size, u8* buf, UsbTransfer* 
 		sdl_to_logitech_g27_button(m_joysticks, m_mapping.left),
 		sdl_to_logitech_g27_button(m_joysticks, m_mapping.right)
 	);
-	data.steering = sdl_to_logitech_g27_steering(m_joysticks, m_mapping.steering) >> 6;
+	data.steering = sdl_to_logitech_g27_steering_filtered(m_joysticks, m_mapping.steering) >> 6;
 	data.brake_throttle = 0x7f;
 	data.const1 = 0x7f;
 	data.const2 = 0x7f;
@@ -1037,7 +1165,7 @@ void usb_device_logitech_g27::transfer_dfp(u32 buf_size, u8* buf, UsbTransfer* t
 	transfer->expected_count = sizeof(data);
 
 	const std::lock_guard lock(m_sdl_handles_mutex);
-	data.steering = sdl_to_logitech_g27_steering(m_joysticks, m_mapping.steering);
+	data.steering = sdl_to_logitech_g27_steering_filtered(m_joysticks, m_mapping.steering);
 	data.cross = sdl_to_logitech_g27_button(m_joysticks, m_mapping.cross);
 	data.square = sdl_to_logitech_g27_button(m_joysticks, m_mapping.square);
 	data.circle = sdl_to_logitech_g27_button(m_joysticks, m_mapping.circle);
@@ -1102,7 +1230,7 @@ void usb_device_logitech_g27::transfer_dfgt(u32 buf_size, u8* buf, UsbTransfer* 
 	data.self_check_done = 1;
 	data.set1 = 1;
 	data.set2 = 1;
-	data.steering = sdl_to_logitech_g27_steering(m_joysticks, m_mapping.steering);
+	data.steering = sdl_to_logitech_g27_steering_filtered(m_joysticks, m_mapping.steering);
 	data.throttle = sdl_to_logitech_g27_pedal(m_joysticks, m_mapping.throttle);
 	data.brake = sdl_to_logitech_g27_pedal(m_joysticks, m_mapping.brake);
 	std::memcpy(buf, &data, sizeof(data));
@@ -1142,7 +1270,7 @@ void usb_device_logitech_g27::transfer_g25(u32 buf_size, u8* buf, UsbTransfer* t
 	data.gearR = sdl_to_logitech_g27_button(m_joysticks, m_mapping.shifter_r);
 	data.pedals_detached = 0;
 	data.powered = 1;
-	data.steering = sdl_to_logitech_g27_steering(m_joysticks, m_mapping.steering);
+	data.steering = sdl_to_logitech_g27_steering_filtered(m_joysticks, m_mapping.steering);
 	data.throttle = sdl_to_logitech_g27_pedal(m_joysticks, m_mapping.throttle);
 	data.brake = sdl_to_logitech_g27_pedal(m_joysticks, m_mapping.brake);
 	data.clutch = sdl_to_logitech_g27_pedal(m_joysticks, m_mapping.clutch);
@@ -1192,7 +1320,7 @@ void usb_device_logitech_g27::transfer_g27(u32 buf_size, u8* buf, UsbTransfer* t
 	data.dial_ccw = sdl_to_logitech_g27_button(m_joysticks, m_mapping.dial_anticlockwise);
 	data.plus = sdl_to_logitech_g27_button(m_joysticks, m_mapping.plus);
 	data.minus = sdl_to_logitech_g27_button(m_joysticks, m_mapping.minus);
-	data.steering = sdl_to_logitech_g27_steering(m_joysticks, m_mapping.steering);
+	data.steering = sdl_to_logitech_g27_steering_filtered(m_joysticks, m_mapping.steering);
 	data.throttle = sdl_to_logitech_g27_pedal(m_joysticks, m_mapping.throttle);
 	data.brake = sdl_to_logitech_g27_pedal(m_joysticks, m_mapping.brake);
 	data.clutch = sdl_to_logitech_g27_pedal(m_joysticks, m_mapping.clutch);
@@ -1771,11 +1899,13 @@ void usb_device_logitech_g27::interrupt_transfer(u32 buf_size, u8* buf, u32 endp
 						}
 						if (m_haptic_handle && m_effect_slots[i].effect_id == -1)
 						{
-							m_effect_slots[i].effect_id = SDL_CreateHapticEffect(m_haptic_handle, &new_effect);
+							const SDL_HapticEffect scaled_effect = apply_ffb_gain(new_effect);
+							m_effect_slots[i].effect_id = SDL_CreateHapticEffect(m_haptic_handle, &scaled_effect);
 						}
 						if (update_hack)
 						{
-							if (!SDL_UpdateHapticEffect(m_haptic_handle, m_effect_slots[i].effect_id, &new_effect))
+							const SDL_HapticEffect scaled_effect = apply_ffb_gain(new_effect);
+							if (!SDL_UpdateHapticEffect(m_haptic_handle, m_effect_slots[i].effect_id, &scaled_effect))
 								logitech_g27_log.error("Failed refreshing slot %d sdl effect %d, %s", i, new_effect.type, SDL_GetError());
 						}
 						m_effect_slots[i].state = logitech_g27_ffb_state::downloaded;
@@ -1803,7 +1933,8 @@ void usb_device_logitech_g27::interrupt_transfer(u32 buf_size, u8* buf, u32 endp
 					}
 					if (cmd == 0xc && !play_effect && m_haptic_handle)
 					{
-						if (!SDL_UpdateHapticEffect(m_haptic_handle, m_effect_slots[i].effect_id, &new_effect))
+						const SDL_HapticEffect scaled_effect = apply_ffb_gain(new_effect);
+						if (!SDL_UpdateHapticEffect(m_haptic_handle, m_effect_slots[i].effect_id, &scaled_effect))
 						{
 							logitech_g27_log.error("Failed refreshing slot %d sdl effect %d, %s", i, new_effect.type, SDL_GetError());
 						}
@@ -1828,7 +1959,8 @@ void usb_device_logitech_g27::interrupt_transfer(u32 buf_size, u8* buf, u32 endp
 						{
 							if (m_effect_slots[i].effect_id == -1)
 							{
-								m_effect_slots[i].effect_id = SDL_CreateHapticEffect(m_haptic_handle, &m_effect_slots[i].last_effect);
+								const SDL_HapticEffect scaled_effect = apply_ffb_gain(m_effect_slots[i].last_effect);
+								m_effect_slots[i].effect_id = SDL_CreateHapticEffect(m_haptic_handle, &scaled_effect);
 							}
 							if (m_effect_slots[i].effect_id != -1)
 							{
@@ -1906,7 +2038,8 @@ void usb_device_logitech_g27::interrupt_transfer(u32 buf_size, u8* buf, u32 endp
 
 				if (m_default_spring_effect_id == -1)
 				{
-					m_default_spring_effect_id = SDL_CreateHapticEffect(m_haptic_handle, &m_default_spring_effect);
+					const SDL_HapticEffect scaled_effect = apply_ffb_gain(m_default_spring_effect);
+					m_default_spring_effect_id = SDL_CreateHapticEffect(m_haptic_handle, &scaled_effect);
 					if (m_default_spring_effect_id == -1)
 					{
 						logitech_g27_log.error("Failed creating default spring effect, %s", SDL_GetError());
@@ -1914,7 +2047,8 @@ void usb_device_logitech_g27::interrupt_transfer(u32 buf_size, u8* buf, u32 endp
 				}
 				else
 				{
-					if (!SDL_UpdateHapticEffect(m_haptic_handle, m_default_spring_effect_id, &m_default_spring_effect))
+					const SDL_HapticEffect scaled_effect = apply_ffb_gain(m_default_spring_effect);
+					if (!SDL_UpdateHapticEffect(m_haptic_handle, m_default_spring_effect_id, &scaled_effect))
 					{
 						logitech_g27_log.error("Failed updating default spring effect, %s", SDL_GetError());
 					}
@@ -1932,7 +2066,8 @@ void usb_device_logitech_g27::interrupt_transfer(u32 buf_size, u8* buf, u32 endp
 
 				if (m_default_spring_effect_id == -1)
 				{
-					m_default_spring_effect_id = SDL_CreateHapticEffect(m_haptic_handle, &m_default_spring_effect);
+					const SDL_HapticEffect scaled_effect = apply_ffb_gain(m_default_spring_effect);
+					m_default_spring_effect_id = SDL_CreateHapticEffect(m_haptic_handle, &scaled_effect);
 					if (m_default_spring_effect_id == -1)
 					{
 						logitech_g27_log.error("Failed creating default spring effect, %s", SDL_GetError());

@@ -7,6 +7,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QScrollArea>
+#include <QSpinBox>
 
 #ifndef _MSC_VER
 #pragma GCC diagnostic push
@@ -60,6 +61,9 @@ private:
 	QCheckBox* m_reverse_effects = nullptr;
 	QComboBox* m_ffb_direction_type = nullptr;
 	QComboBox* m_compatibility_limit = nullptr;
+	QSpinBox* m_ffb_gain = nullptr;
+	QSpinBox* m_steering_deadzone = nullptr;
+	QSpinBox* m_steering_smoothing = nullptr;
 
 	std::map<mapping_device, Mapping*> m_mappings;
 
