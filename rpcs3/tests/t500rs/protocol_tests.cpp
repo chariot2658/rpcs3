@@ -93,14 +93,14 @@ void captured_constant_and_periodic()
 	send(p, "01000040271000ffff0e001c000000");
 	CHECK(p.decode(0).level == 28 * 32767 / 127);
 	CHECK(p.decode(0).delay == 0 && p.decode(0).length == 0x1027);
-	CHECK(!p.slots[0].playing);
-	send(p, "41004101", 1000); CHECK(p.slots[0].playing && p.slots[0].started_at_us == 1000);
-	const auto start = p.slots[0].starts;
+	CHECK(!p.effect_slots[0].playing);
+	send(p, "41004101", 1000); CHECK(p.effect_slots[0].playing && p.effect_slots[0].started_at_us == 1000);
+	const auto start = p.effect_slots[0].starts;
 	send(p, "030e00cc"); CHECK(p.decode(0).level == -52 * 32767 / 127);
-	CHECK(p.slots[0].starts == start);
+	CHECK(p.effect_slots[0].starts == start);
 	send(p, "030e0080"); CHECK(p.decode(0).level == -32767); CHECK(p.decode(0, true).level == 32767);
-	send(p, "41000001"); CHECK(!p.slots[0].playing);
-	send(p, "41004101"); CHECK(p.slots[0].starts != start);
+	send(p, "41000001"); CHECK(!p.effect_slots[0].playing);
+	send(p, "41004101"); CHECK(p.effect_slots[0].starts != start);
 	// Captured ctl_panel_boing: 149 ms attack, 300 ms delay, 33 ms sine period.
 	send(p, "02380095003fe50100"); send(p, "042a002000002100");
 	send(p, "01012240bc02002c012a0038000000"); send(p, "41014101");
@@ -113,7 +113,7 @@ void captured_constant_and_periodic()
 	send(p, "02540000000c00000c"); send(p, "0446000c00004d01");
 	send(p, "01022240e803000000460054000000"); send(p, "41024101");
 	CHECK(p.decode(2).period == 333 && p.decode(2).magnitude == 12 * 32767 / 127);
-	send(p, "41010001"); CHECK(!p.slots[1].playing && p.slots[2].playing);
+	send(p, "41010001"); CHECK(!p.effect_slots[1].playing && p.effect_slots[2].playing);
 }
 
 void linux_stream_and_conditions()
@@ -143,7 +143,7 @@ void linux_stream_and_conditions()
 		CHECK(p.output(main) == result::ok);
 		CHECK(p.decode(i).kind == effect_kind::damper && p.decode(i).right_coeff == 32767);
 	}
-	p.stop_all(); for (const auto& s : p.slots) CHECK(!s.playing);
+	p.stop_all(); for (const auto& s : p.effect_slots) CHECK(!s.playing);
 	p.reset(); CHECK(p.decode(0).kind == effect_kind::none && p.format == dialect::linux_reference);
 }
 
