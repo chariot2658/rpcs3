@@ -1,0 +1,60 @@
+name: Auto-rebase t500rs onto upstream
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: auto-rebase-t500rs
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    if: github.repository == 'chariot2658/rpcs3'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout t500rs
+        uses: actions/checkout@main
+        with:
+          ref: t500rs
+          fetch-depth: 0
+
+      - name: Rebase onto RPCS3 master
+        id: rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/RPCS3/rpcs3.git
+          git fetch --no-tags upstream master
+          git fetch --no-tags origin t500rs
+
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo 'rebased=false' >> "$GITHUB_OUTPUT"
+            echo 't500rs is already based on the latest upstream master.'
+            exit 0
+          fi
+
+          expected_head="$(git rev-parse origin/t500rs)"
+          git rebase upstream/master
+          git push origin HEAD:refs/heads/t500rs \
+            --force-with-lease="refs/heads/t500rs:${expected_head}"
+          echo 'rebased=true' >> "$GITHUB_OUTPUT"
+
+      # Pushes made with GITHUB_TOKEN do not start another workflow, so dispatch
+      # the Windows build explicitly after a successful automated rebase.
+      - name: Trigger Windows x64 build
+        if: steps.rebase.outputs.rebased == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run windows-x64.yml --ref t500rs
