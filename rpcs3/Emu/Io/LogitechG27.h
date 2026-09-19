@@ -128,6 +128,9 @@ private:
 	void transfer_g25(u32 buf_size, u8* buf, UsbTransfer* transfer) const;
 	void transfer_g27(u32 buf_size, u8* buf, UsbTransfer* transfer) const;
 	SDL_HapticDirection make_steering_direction() const;
+	u16 sdl_to_logitech_g27_steering_filtered(const std::map<u64, std::vector<SDL_Joystick*>>& joysticks, const sdl_mapping& mapping) const;
+	s16 apply_steering_filter(s16 raw_value) const;
+	SDL_HapticEffect apply_ffb_gain(const SDL_HapticEffect& effect) const;
 
 	u32 m_controller_index = 0;
 
@@ -135,6 +138,11 @@ private:
 	logitech_personality m_next_personality = logitech_personality::invalid;
 	logitech_g27_sdl_mapping m_mapping {};
 	bool m_reverse_effects = false;
+	u32 m_ffb_gain = 100;
+	u32 m_steering_deadzone = 0;
+	u32 m_steering_smoothing = 0;
+	mutable s16 m_filtered_steering = 0;
+	mutable bool m_steering_filter_init = false;
 
 	mutable std::mutex m_sdl_handles_mutex;
 	SDL_Joystick* m_led_joystick_handle = nullptr;
