@@ -116,12 +116,48 @@ force mixer for hosts with too few effect slots. Extra Logitech shifter/dial/LED
 bindings do not become T500RS base features. HID idle rates are stored and
 reported; interrupt input is still refreshed at the endpoint polling interval.
 
-A real T500RS is **not required** for the next useful test: run GT5 with your
-ordinary SDL-compatible wheel, see whether the guest recognizes the virtual
-T500RS, then inspect the `T500RS` log channel. No GT5 recognition or successful
-force-feedback session has been observed for this patch yet.
+A real T500RS is **not required** to test this with an ordinary SDL-compatible
+wheel. GT5 2.11 now recognizes the virtual T500RS and polls it, but a user test
+reported no button response. Successful game input and force feedback remain
+unverified; see the diagnostic procedure below.
 
 ## Validation
+
+### Diagnosing game input
+
+With RPCS3 closed, enable the following channels in the game's custom YAML
+configuration (replace its existing `Log` section), then boot the game fresh:
+
+```yaml
+Log:
+  T500RS: Trace
+  sys_usbd: Trace
+  logitech_g27: Trace
+  SDL: Trace
+```
+
+The T500RS trace records control replies, queued identification/status replies,
+OUT decoder results, and sampled input reports with requested/returned lengths.
+`Input sample` shows mapped SDL axes in steering/throttle/brake/clutch order
+(after mapping and inversion, before guest range/pedal scaling), mapping-device
+presence, mapped button bits and hat, and whether input is allowed.
+`SDL raw` samples list each open device's type ID (matching `LogitechG27.yml`),
+raw axes, pressed button indices, and hat masks before mapping or inversion.
+Physical inputs are sampled even while suppressed; the guest still receives a
+neutral report when `allowed=0`. Routine input samples are limited to ten per second;
+button, hat, suppression and requested-length changes are logged immediately.
+The logged report bytes are bounded to the guest's requested length.
+
+Move the wheel and press/release buttons for 15 seconds, then exit RPCS3 and
+preserve `log/RPCS3.log` before reopening it. Remove the Trace overrides after
+testing. The GUI log display filter alone does not enable these channels.
+
+GT5 2.11 has been observed attaching to `044f:b65e` and continuously polling
+input, while sending unsupported vendor request `0x47`, OUT command `0x81`,
+effect identifiers `0x01/0x07/0x08`, and start value `0x01`. These diagnostics
+do not add support for those commands or establish the cause of missing input.
+
+### Focused tests
 
 Standalone tests use the real protocol code:
 

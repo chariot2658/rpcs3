@@ -129,7 +129,8 @@ private:
 	void init_t500rs();
 	void control_t500rs(u8 request_type, u8 request, u16 value, u16 index, u16 length, u32 size, u8* data, UsbTransfer* transfer);
 	void interrupt_t500rs(u32 size, u8* data, u32 endpoint, UsbTransfer* transfer);
-	t500rs::input_report input_t500rs() const;
+	t500rs::input_report input_t500rs(u32 requested_size = 15) const;
+	void trace_t500rs_input(const t500rs::input& state, const std::array<s16, 4>& axes, bool allowed, u16 range, u32 requested_size, const t500rs::input_report& report) const;
 	t500rs::result output_t500rs(std::span<const u8> data);
 	void update_t500rs_haptics();
 	void invalidate_t500rs_haptics();
@@ -167,6 +168,13 @@ private:
 	std::array<u8, 256> m_t500rs_idle{};
 	u8 m_t500rs_hid_protocol = 1;
 	std::set<u32> m_t500rs_warnings;
+	// Protected by m_sdl_handles_mutex. Sample axes at 10 Hz, but retain every
+	// button/hat and input-suppression transition observed by the USB callback.
+	mutable u64 m_t500rs_next_input_trace = 0;
+	mutable u16 m_t500rs_trace_buttons = 0;
+	mutable u8 m_t500rs_trace_hat = 15;
+	mutable bool m_t500rs_trace_allowed = false;
+	mutable u32 m_t500rs_trace_size = 0;
 
 	u32 m_controller_index = 0;
 
