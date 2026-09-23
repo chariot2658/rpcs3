@@ -39,6 +39,8 @@ void usb_device_logitech_g27::control_t500rs(u8 request_type, u8 request, u16 va
 		const u32 count = std::min<u32>(available, static_cast<u32>(bytes.size()));
 		if (count) std::memcpy(data, bytes.data(), count);
 		transfer->expected_count = count;
+		t500rs_log.trace("Control reply type=%02x request=%02x value=%04x requested=%u buffer=%u returned=%u: %s",
+			request_type, request, value, length, size, count, fmt::buf_to_hexstring(bytes.data(), count));
 	};
 	const auto reply_byte = [&](u8 b) { reply(std::span<const u8>(&b, 1)); };
 
@@ -57,6 +59,8 @@ void usb_device_logitech_g27::control_t500rs(u8 request_type, u8 request, u16 va
 		if (type == USB_DESCRIPTOR_STRING && (value & 0xff) <= 2 && request_type == 0x80)
 		{
 			transfer->expected_count = get_descriptor(type, value & 0xff, data, std::min<u32>(available, 255));
+			t500rs_log.trace("String descriptor reply requested=%u buffer=%u returned=%u: %s", length, size,
+				transfer->expected_count, fmt::buf_to_hexstring(data, transfer->expected_count));
 			return;
 		}
 	}
@@ -130,7 +134,7 @@ void usb_device_logitech_g27::control_t500rs(u8 request_type, u8 request, u16 va
 	if (request_type == 0xa1 && index == 0 && request == 1 && value == 0x0107)
 	{
 		sdl_instance::get_instance().pump_events();
-		reply(input_t500rs()); return;
+		reply(input_t500rs(available)); return;
 	}
 	transfer->expected_result = EHCI_CC_HALTED;
 	const std::lock_guard lock(m_t500rs_mutex);
@@ -139,11 +143,76 @@ void usb_device_logitech_g27::control_t500rs(u8 request_type, u8 request, u16 va
 		t500rs_log.warning("Unsupported control type=%02x request=%02x value=%04x index=%04x length=%u (enable T500RS trace for all requests)", request_type, request, value, index, length);
 }
 
+void usb_device_logitech_g27::trace_t500rs_input(const t500rs::input& state, const std::array<s16, 4>& axes, bool allowed, u16 range, u32 requested_size, const t500rs::input_report& report) const
+{
+	if (!t500rs_log.trace)
+	{
+		return;
+	}
+	// Called with m_sdl_handles_mutex held. Axis noise should not produce a log
+	// entry at every USB poll; digital transitions should still be visible.
+	const u64 now = get_timestamp();
+	if (now < m_t500rs_next_input_trace && state.buttons == m_t500rs_trace_buttons && state.hat == m_t500rs_trace_hat &&
+		allowed == m_t500rs_trace_allowed && requested_size == m_t500rs_trace_size)
+	{
+		return;
+	}
+	m_t500rs_next_input_trace = now + 100'000;
+	m_t500rs_trace_buttons = state.buttons;
+	m_t500rs_trace_hat = state.hat;
+	m_t500rs_trace_allowed = allowed;
+	m_t500rs_trace_size = requested_size;
+
+	const auto present = [this](const sdl_mapping& mapping)
+	{
+		const auto it = m_joysticks.find(mapping.device_type_id);
+		return it != m_joysticks.end() && !it->second.empty();
+	};
+	const u32 count = std::min<u32>(requested_size, static_cast<u32>(report.size()));
+	t500rs_log.trace("Input sample: allowed=%d steering_present=%d mapped_axes=[%d,%d,%d,%d] axes_present=[%d,%d,%d,%d] buttons=%04x hat=%u host_range=%u guest_range=%u",
+		allowed, !!m_steering_device_present, axes[0], axes[1], axes[2], axes[3],
+		present(m_mapping.steering), present(m_mapping.throttle), present(m_mapping.brake), present(m_mapping.clutch),
+		state.buttons, state.hat, m_t500rs_host_range, range);
+	t500rs_log.trace("Input report: requested=%u returned=%u: %s", requested_size, count, fmt::buf_to_hexstring(report.data(), count));
+	for (const auto& [device_type_id, joysticks] : m_joysticks)
+	{
+		for (usz device_index = 0; device_index < joysticks.size(); device_index++)
+		{
+			SDL_Joystick* joystick = joysticks[device_index];
+			std::string raw_axes, pressed_buttons, hats;
+			for (int i = 0; i < SDL_GetNumJoystickAxes(joystick); i++)
+			{
+				if (i)
+					raw_axes += ',';
+				raw_axes += std::to_string(SDL_GetJoystickAxis(joystick, i));
+			}
+			for (int i = 0; i < SDL_GetNumJoystickButtons(joystick); i++)
+			{
+				if (SDL_GetJoystickButton(joystick, i))
+				{
+					if (!pressed_buttons.empty())
+						pressed_buttons += ',';
+					pressed_buttons += std::to_string(i);
+				}
+			}
+			for (int i = 0; i < SDL_GetNumJoystickHats(joystick); i++)
+			{
+				if (i)
+					hats += ',';
+				hats += std::to_string(SDL_GetJoystickHat(joystick, i));
+			}
+			t500rs_log.trace("SDL raw: device_type_id=%llu instance=%u axes=[%s] pressed_buttons=[%s] hats=[%s]",
+				device_type_id, static_cast<u32>(device_index), raw_axes, pressed_buttons, hats);
+		}
+	}
+}
+
 t500rs::result usb_device_logitech_g27::output_t500rs(std::span<const u8> data)
 {
 	const std::lock_guard lock(m_t500rs_mutex);
 	t500rs_log.trace("OUT: %s", fmt::buf_to_hexstring(data.data(), data.size()));
 	const auto result = m_t500rs.output(data, get_timestamp());
+	t500rs_log.trace("OUT result=%u (0=ok, 1=malformed, 2=unsupported)", static_cast<u32>(result));
 	if (result != t500rs::result::ok)
 	{
 		const u32 key = 0x2000000u | (static_cast<u32>(data.empty() ? 0 : data[0]) << 8) | (data.size() > 1 ? data[1] : 0);
@@ -162,6 +231,7 @@ void usb_device_logitech_g27::interrupt_t500rs(u32 size, u8* data, u32 endpoint,
 	if (!data || !size || !current_config)
 	{
 		transfer->expected_result = EHCI_CC_HALTED;
+		t500rs_log.trace("Interrupt halted: endpoint=%02x size=%u buffer_present=%d configuration=%u", endpoint, size, data != nullptr, current_config);
 		return;
 	}
 	if (endpoint == 0x82)
@@ -175,10 +245,15 @@ void usb_device_logitech_g27::interrupt_t500rs(u32 size, u8* data, u32 endpoint,
 		if (!pending)
 		{
 			sdl_instance::get_instance().pump_events();
-			report = input_t500rs();
+			report = input_t500rs(size);
 		}
 		transfer->expected_count = std::min<u32>(size, static_cast<u32>(report.size()));
 		std::memcpy(data, report.data(), transfer->expected_count);
+		if (pending)
+		{
+			t500rs_log.trace("Queued IN reply: endpoint=%02x requested=%u returned=%u: %s", endpoint, size,
+				transfer->expected_count, fmt::buf_to_hexstring(data, transfer->expected_count));
+		}
 	}
 	else if (endpoint == 1 && size <= 32 && output_t500rs(std::span<const u8>(data, size)) == t500rs::result::ok)
 		transfer->expected_count = size;

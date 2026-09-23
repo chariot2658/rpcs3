@@ -1193,11 +1193,10 @@ static u8 sdl_to_logitech_g27_pedal(const std::map<u64, std::vector<SDL_Joystick
 	return unsigned_avg * 0xFF / 0xFFFF;
 }
 
-t500rs::input_report usb_device_logitech_g27::input_t500rs() const
+t500rs::input_report usb_device_logitech_g27::input_t500rs(u32 requested_size) const
 {
 	t500rs::input state{};
-	if (!is_input_allowed())
-		return t500rs::make_input_report(state);
+	const bool allowed = is_input_allowed();
 	u16 range;
 	{
 		const std::lock_guard lock(m_t500rs_mutex);
@@ -1216,10 +1215,12 @@ t500rs::input_report usb_device_logitech_g27::input_t500rs() const
 		const auto it = m_joysticks.find(mapping.device_type_id);
 		return it != m_joysticks.end() && !it->second.empty() && sdl_to_logitech_g27_button(m_joysticks, mapping);
 	};
-	state.steering = static_cast<u16>(std::clamp(axis(m_mapping.steering, true) * m_t500rs_host_range / range, -32768, 32767) + 32768);
-	state.throttle = static_cast<u16>((axis(m_mapping.throttle, false) + 32768) * 1023 / 65535);
-	state.brake = static_cast<u16>((axis(m_mapping.brake, false) + 32768) * 1023 / 65535);
-	state.clutch = static_cast<u16>((axis(m_mapping.clutch, false) + 32768) * 1023 / 65535);
+	const std::array<s16, 4> axes{static_cast<s16>(axis(m_mapping.steering, true)), static_cast<s16>(axis(m_mapping.throttle, false)),
+		static_cast<s16>(axis(m_mapping.brake, false)), static_cast<s16>(axis(m_mapping.clutch, false))};
+	state.steering = static_cast<u16>(std::clamp(axes[0] * m_t500rs_host_range / range, -32768, 32767) + 32768);
+	state.throttle = static_cast<u16>((axes[1] + 32768) * 1023 / 65535);
+	state.brake = static_cast<u16>((axes[2] + 32768) * 1023 / 65535);
+	state.clutch = static_cast<u16>((axes[3] + 32768) * 1023 / 65535);
 	const std::array buttons{&m_mapping.square, &m_mapping.cross, &m_mapping.circle, &m_mapping.triangle,
 		&m_mapping.shift_up, &m_mapping.shift_down, &m_mapping.r2, &m_mapping.l2,
 		&m_mapping.select, &m_mapping.start, &m_mapping.l3, &m_mapping.r3, &m_mapping.ps};
@@ -1228,7 +1229,11 @@ t500rs::input_report usb_device_logitech_g27::input_t500rs() const
 	const bool up = button(m_mapping.up), down = button(m_mapping.down);
 	const bool left = button(m_mapping.left), right = button(m_mapping.right);
 	state.hat = hat_components_to_logitech_g27_hat(up && !down, down && !up, left && !right, right && !left);
-	return t500rs::make_input_report(state);
+	// Continue sampling for diagnostics when input is suppressed, but only send
+	// the neutral report to the guest, as before.
+	const auto report = t500rs::make_input_report(allowed ? state : t500rs::input{});
+	trace_t500rs_input(state, axes, allowed, range, requested_size, report);
+	return report;
 }
 
 void usb_device_logitech_g27::transfer_dfex(u32 buf_size, u8* buf, UsbTransfer* transfer) const
