@@ -56,6 +56,7 @@ void enumeration_and_input()
 		CHECK(static_cast<unsigned>(b[11] | (b[12] << 8)) == (1u << bit));
 	}
 	equals(vendor_reply(0x49), "49000000010002000300000002020000");
+	equals(vendor_reply(0x47), "4700030000000200");
 	equals(vendor_reply(0x56), "56002f00");
 	equals(vendor_reply(0x42), "42e803");
 	CHECK(vendor_reply(0x99).empty());

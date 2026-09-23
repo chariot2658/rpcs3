@@ -57,6 +57,7 @@ when T500RS is selected; the T500RS backend handles guest-requested gain itself.
   polarity match the capture. Named button assignments and pedal roles still
   need game validation; each binding can be changed in the mapper.
 - Captured vendor queries `0x42`, `0x48`, `0x49`, `0x4e`, `0x55`, `0x56`,
+  plus the T500 model reply to `0x47` documented by hid-tminit,
   attachment queries `0a 04 90 03`, `0a 04 12 10`, `0a 04 00 06`, queued
   report `0x14` replies, and the `41/48/0040` input-mode acknowledgement.
 - Standard descriptor/status/configuration/interface requests; HID GET_REPORT,
@@ -108,7 +109,7 @@ This patch retains two explicit interpretations rather than blending fields.
 | Condition deadband | `/65` in the reference is itself marked unconfirmed. The inverse is bounded and tested but not physically calibrated. |
 | Friction versus inertia versus damper | Indistinguishable in the supplied wire format; all map to damper. There are no fabricated distinct opcodes. |
 | Physical rotation stops | SDL offers no portable wheel-range command. Only guest steering input is rescaled. Set the physical range in the wheel driver. |
-| PS3 initialization | Windows enumeration is reproduced. GT5 may issue additional PS3-specific requests; these are logged and rejected rather than given fabricated successful replies. |
+| PS3 initialization | Windows enumeration is reproduced. GT5 asks for vendor request `0x47`; the T500 model reply documented by hid-tminit is now supplied. That capture came from the generic boot identity; its use after the `b65e` mode switch still needs a GT5 test. Other unknown PS3-specific requests remain logged and rejected. |
 
 Not included: the initial `b65d` boot personality, firmware programming,
 standalone TH8RS/TH8A gear-shifter USB emulation, F1-rim variants, or a physical
@@ -153,9 +154,10 @@ preserve `log/RPCS3.log` before reopening it. Remove the Trace overrides after
 testing. The GUI log display filter alone does not enable these channels.
 
 GT5 2.11 has been observed attaching to `044f:b65e` and continuously polling
-input, while sending unsupported vendor request `0x47`, OUT command `0x81`,
-effect identifiers `0x01/0x07/0x08`, and start value `0x01`. These diagnostics
-do not add support for those commands or establish the cause of missing input.
+input. The first traced run showed vendor request `0x47`, OUT command `0x81`,
+effect identifiers `0x01/0x07/0x08`, and start value `0x01`. The `0x47` reply is
+now implemented; the other commands remain unsupported, and a GT5 retest is
+needed to determine whether the reply enables game input.
 
 ### Focused tests
 
@@ -188,6 +190,7 @@ there, while address and undefined-behavior instrumentation remained enabled.
 
 - RPCS3 base: https://github.com/RPCS3/rpcs3/tree/8db660b185496f115701ef4c77c1ca2bef60e422
 - PR stack: https://github.com/Kimplul/hid-tmff2/pull/223
+- T500 model query response (`0x47`): https://github.com/scarburato/hid-tminit#recapitulatory-table
 - Reference encoder: https://github.com/cazzoo/hid-tmff2/tree/f4eed4ecb104c6c148774d72ae519d1b2c422e61/src/tmt500rs
 - Archived captures: https://github.com/cazzoo/hid-tmff2/tree/92315ba6145aebe01e5efd7442664873bf231e89/captures
 - HID/descriptor capture: `plug_t500_in.pcapng`, Git blob `088abdefb828c0ec31938b6bb11d1db85d61ccaa`.
