@@ -44,6 +44,9 @@ input_report make_input_report(const input& state)
 
 std::span<const byte> vendor_reply(byte request)
 {
+	// T500 model identification returned for vendor request 0x47.
+	// Captured by hid-tminit from the wheel's generic boot personality.
+	static constexpr std::array<byte, 8> model{0x47,0x00,0x03,0x00,0x00,0x00,0x02,0x00};
 	static constexpr std::array<byte, 16> capabilities{0x49,0,0,0,1,0,2,0,3,0,0,0,2,2,0,0};
 	static constexpr std::array<byte, 4> firmware{0x56,0,0x2f,0};
 	static constexpr std::array<byte, 16> status{0x55};
@@ -52,6 +55,7 @@ std::span<const byte> vendor_reply(byte request)
 	static constexpr std::array<byte, 2> mode{0x4e,0x14};
 	switch (request)
 	{
+	case 0x47: return model;
 	case 0x49: return capabilities;
 	case 0x56: return firmware;
 	case 0x55: return status;
