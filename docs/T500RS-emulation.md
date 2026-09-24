@@ -56,7 +56,8 @@ when T500RS is selected; the T500RS backend handles guest-requested gain itself.
 - 16-bit steering, 10-bit separate pedals, 13 button bits and 8-way hat.
   Neutral input has released pedals and hat `0x0f`; byte layout and neutral
   polarity match the capture. Named buttons follow GT5 2.11's recovered menu
-  mapping. Pedal roles still need driving validation; bindings remain remappable.
+  mapping. A GT5 driving test confirms brake at bytes 3..4, throttle at 5..6;
+  clutch stays at 7..8 and still needs physical validation. Bindings remain remappable.
 - Capture-derived vendor queries `0x42`, `0x48`, `0x49`, `0x4e`, `0x55`, `0x56`,
   plus the T500 model reply to `0x47` documented by hid-tminit,
   attachment queries `0a 04 90 03`, `0a 04 12 10`, `0a 04 00 06`, queued
@@ -150,10 +151,16 @@ reply. Early `0x07` polling is retained; it cannot itself set GT5 ready. The
 reference model's synthetic zero identification word and alternative endpoint
 addresses are unnecessary for this implementation.
 
+The user's 2026-09-25 test confirms working buttons and steering. It also
+resolves the tentative pedal names in the analysis: channel 0 is brake and
+channel 1 is throttle. The report encoder now uses that order; the host mapper
+and configuration labels keep their usual meanings. This corrects the reported
+throttle/brake exchange without asking users to swap their bindings.
+
 These findings support input/startup corrections, not a complete GT5 FFB
 decoder. Commands `0x81`, effect types `0x01/0x07/0x08`, and start value `0x01`
-seen in the user's earlier trace remain unsupported. Game input, driving
-pedal names, FFB fidelity and other game versions still require runtime tests.
+seen in the user's trace remain unsupported. The corrected pedal order, clutch,
+FFB fidelity and other game versions still require runtime tests.
 
 Not included: the initial `b65d` boot personality, firmware programming,
 standalone TH8RS/TH8A gear-shifter USB emulation, F1-rim variants, or a physical
@@ -162,9 +169,9 @@ bindings do not become T500RS base features. HID idle rates are stored and
 reported; interrupt input is still refreshed at the endpoint polling interval.
 
 A real T500RS is **not required** to test this with an ordinary SDL-compatible
-wheel. GT5 2.11 now recognizes the virtual T500RS and polls it, but a user test
-reported no button response. Successful game input and force feedback remain
-unverified; see the diagnostic procedure below.
+wheel. The user's GT5 2.11 retest confirms working buttons and steering;
+throttle/brake were exchanged and are corrected here. Force feedback remains
+unimplemented for GT5's PS3 command format; see the diagnostic procedure below.
 
 ## Validation
 
@@ -201,7 +208,8 @@ GT5 2.11 has been observed attaching to `044f:b65e` and continuously polling
 input. The first traced run showed vendor request `0x47`, OUT command `0x81`,
 effect identifiers `0x01/0x07/0x08`, and start value `0x01`. The `0x47` reply is
 now implemented along with the revision-2 input corrections above; the other
-commands remain unsupported. A GT5 retest is needed to confirm usable input.
+commands remain unsupported. A later user test confirmed usable buttons and
+steering. See `T500RS-GT5-FFB-next.md` for the driving trace and remaining FFB work.
 
 ### Focused tests
 
