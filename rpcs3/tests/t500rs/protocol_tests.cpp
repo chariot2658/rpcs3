@@ -81,10 +81,10 @@ void enumeration_and_input()
 	in.steering = 0x80e6;
 	equals_report(make_input_report(in), "07e680ff03ff03ff0300000000000f");
 	in.steering = 0; in.throttle = 0; in.brake = 1023; in.clutch = 512; in.buttons = 0x1fff; in.hat = 7;
-	equals_report(make_input_report(in), "0700000000ff0300020000ff1f0007");
+	equals_report(make_input_report(in), "070000ff03000000020000ff1f0007");
 	in.steering = 65535; in.throttle = 65535; in.buttons = 0xe000; in.hat = 255;
 	const auto r = make_input_report(in);
-	CHECK(r[1] == 255 && r[2] == 255 && r[3] == 255 && r[4] == 3);
+	CHECK(r[1] == 255 && r[2] == 255 && r[5] == 255 && r[6] == 3);
 	CHECK(r[11] == 0 && r[12] == 0 && r[14] == 15);
 	for (unsigned bit = 0; bit < 13; ++bit)
 	{
@@ -98,6 +98,19 @@ void enumeration_and_input()
 	equals(vendor_reply(0x42), "42e8030000000000");
 	equals(vendor_reply(0x4e), "4e10000000000000");
 	CHECK(vendor_reply(0x99).empty());
+}
+
+void gt5_pedal_order()
+{
+	input state;
+	state.throttle = 0;
+	equals_report(make_input_report(state), "070080ff030000ff0300000000000f");
+	state.throttle = 1023;
+	state.brake = 0;
+	equals_report(make_input_report(state), "0700800000ff03ff0300000000000f");
+	state.brake = 1023;
+	state.clutch = 0;
+	equals_report(make_input_report(state), "070080ff03ff03000000000000000f");
 }
 
 void initialization()
@@ -220,6 +233,6 @@ void malformed_and_fuzz()
 
 int main()
 {
-	enumeration_and_input(); initialization(); captured_constant_and_periodic(); linux_stream_and_conditions(); malformed_and_fuzz();
+	enumeration_and_input(); gt5_pedal_order(); initialization(); captured_constant_and_periodic(); linux_stream_and_conditions(); malformed_and_fuzz();
 	std::cout << "PASS: descriptors, input, captured initialization, FFB lifecycle, 16 slots, truncation and 100000 fuzz packets\n";
 }

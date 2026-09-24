@@ -34,8 +34,10 @@ input_report make_input_report(const input& state)
 	input_report out{};
 	out[0] = 7;
 	put16(out, 1, state.steering);
-	put16(out, 3, std::min<std::uint16_t>(state.throttle, 1023));
-	put16(out, 5, std::min<std::uint16_t>(state.brake, 1023));
+	// GT5's driving consumer reads channel 1 before channel 0. The user's
+	// driving test confirms brake at 3..4 and throttle at 5..6.
+	put16(out, 3, std::min<std::uint16_t>(state.brake, 1023));
+	put16(out, 5, std::min<std::uint16_t>(state.throttle, 1023));
 	put16(out, 7, std::min<std::uint16_t>(state.clutch, 1023));
 	put16(out, 11, state.buttons & 0x1fff);
 	out[14] = state.hat < 8 ? state.hat : 15;
