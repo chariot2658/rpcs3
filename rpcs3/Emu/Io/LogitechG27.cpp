@@ -1221,9 +1221,10 @@ t500rs::input_report usb_device_logitech_g27::input_t500rs(u32 requested_size) c
 	state.throttle = static_cast<u16>((axes[1] + 32768) * 1023 / 65535);
 	state.brake = static_cast<u16>((axes[2] + 32768) * 1023 / 65535);
 	state.clutch = static_cast<u16>((axes[3] + 32768) * 1023 / 65535);
-	const std::array buttons{&m_mapping.square, &m_mapping.cross, &m_mapping.circle, &m_mapping.triangle,
-		&m_mapping.shift_up, &m_mapping.shift_down, &m_mapping.r2, &m_mapping.l2,
-		&m_mapping.select, &m_mapping.start, &m_mapping.l3, &m_mapping.r3, &m_mapping.ps};
+	// GT5's B65E decoder and LDD pad mapping use this raw bit order.
+	const std::array buttons{&m_mapping.shift_down, &m_mapping.shift_up, &m_mapping.triangle, &m_mapping.square,
+		&m_mapping.circle, &m_mapping.cross, &m_mapping.select, &m_mapping.start,
+		&m_mapping.r2, &m_mapping.l2, &m_mapping.l3, &m_mapping.r3, &m_mapping.ps};
 	for (std::size_t i = 0; i < buttons.size(); ++i)
 		if (button(*buttons[i])) state.buttons |= static_cast<u16>(1u << i);
 	const bool up = button(m_mapping.up), down = button(m_mapping.down);
