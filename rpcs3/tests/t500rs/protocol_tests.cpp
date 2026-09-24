@@ -34,17 +34,54 @@ void equals(std::span<const byte> actual, std::string_view expected)
 	CHECK(std::equal(actual.begin(), actual.end(), bytes.begin(), bytes.end()));
 }
 
+void equals_report(const input_report& actual, std::string_view prefix)
+{
+	auto expected = hex(prefix);
+	expected.resize(32, 0);
+	CHECK(std::equal(actual.begin(), actual.end(), expected.begin(), expected.end()));
+}
+
+void hid_report_sizes()
+{
+	// Parse HID short items independently to check the descriptor's declared
+	// lengths, including padding and excluding the one-byte report ID.
+	std::array<unsigned, 256> input_bits{}, output_bits{};
+	unsigned size = 0, count = 0, id = 0;
+	for (std::size_t i = 0; i < report_descriptor.size();)
+	{
+		const auto tag = report_descriptor[i++];
+		const unsigned length = (tag & 3) == 3 ? 4 : tag & 3;
+		CHECK(i + length <= report_descriptor.size());
+		unsigned value = 0;
+		for (unsigned j = 0; j < length; ++j)
+			value |= static_cast<unsigned>(report_descriptor[i++]) << (j * 8);
+		switch (tag & 0xfc)
+		{
+		case 0x74: size = value; break;
+		case 0x94: count = value; break;
+		case 0x84: id = value; CHECK(id < 256); break;
+		case 0x80: input_bits[id] += size * count; break;
+		case 0x90: output_bits[id] += size * count; break;
+		default: break;
+		}
+	}
+	CHECK(input_bits[7] == 31 * 8 && input_bits[2] == 31 * 8 && input_bits[0x14] == 31 * 8);
+	CHECK(output_bits[0x0a] == 14 * 8);
+	CHECK((configuration_descriptor[25] | (configuration_descriptor[26] << 8)) == report_descriptor.size());
+	CHECK(configuration_descriptor[31] == 32 && configuration_descriptor[32] == 0);
+}
+
 void enumeration_and_input()
 {
-	// Raw bytes extracted independently from plug_t500_in.pcapng, frames 2,6,20,91.
+	// Capture-derived identity; IN endpoint/report lengths extended for GT5.
 	equals(device_descriptor, "12010002000000084f045eb6000101020001");
-	equals(configuration_descriptor, "09022900010100c0320904000002030000000921110100012282000705820310000207050103200004");
-	equals(report_descriptor, "05010904a1010901a10085070930150027ffff0000350047ffff0000751095018102093126ff0346ff0381020935810209368102810305091901290d250145017501950d8102750b95018103050109392507463b01550065147504814265008103850a0600ff090a7508950e26ff0046ff009102850209028102091485148102c0c0");
+	equals(configuration_descriptor, "09022900010100c032090400000203000000092111010001228a000705820320000207050103200004");
+	hid_report_sizes();
 	input in;
 	in.steering = 0x80e6;
-	equals(make_input_report(in), "07e680ff03ff03ff0300000000000f");
+	equals_report(make_input_report(in), "07e680ff03ff03ff0300000000000f");
 	in.steering = 0; in.throttle = 0; in.brake = 1023; in.clutch = 512; in.buttons = 0x1fff; in.hat = 7;
-	equals(make_input_report(in), "0700000000ff0300020000ff1f0007");
+	equals_report(make_input_report(in), "0700000000ff0300020000ff1f0007");
 	in.steering = 65535; in.throttle = 65535; in.buttons = 0xe000; in.hat = 255;
 	const auto r = make_input_report(in);
 	CHECK(r[1] == 255 && r[2] == 255 && r[3] == 255 && r[4] == 3);
@@ -58,7 +95,8 @@ void enumeration_and_input()
 	equals(vendor_reply(0x49), "49000000010002000300000002020000");
 	equals(vendor_reply(0x47), "4700030000000200");
 	equals(vendor_reply(0x56), "56002f00");
-	equals(vendor_reply(0x42), "42e803");
+	equals(vendor_reply(0x42), "42e8030000000000");
+	equals(vendor_reply(0x4e), "4e10000000000000");
 	CHECK(vendor_reply(0x99).empty());
 }
 
@@ -70,17 +108,25 @@ void initialization()
 	send(p, "0a0412100000000000000000000000");
 	send(p, "0a0400060000000000000000000000");
 	input_report r;
-	CHECK(p.pop_reply(r)); equals(r, "14209003afa72e1400000000000000");
-	CHECK(p.pop_reply(r)); equals(r, "14201210002f5eb600000000000000");
-	CHECK(p.pop_reply(r)); equals(r, "142000061800000000000000000000");
+	CHECK(p.pop_reply(r)); equals_report(r, "14209003afa72e1400000000000000");
+	CHECK(p.pop_reply(r)); equals_report(r, "14201210002f5eb600000000000000");
+	CHECK(p.pop_reply(r)); equals_report(r, "142000061800000000000000000000");
 	CHECK(!p.pop_reply(r));
 	CHECK(p.output(hex("0a04ffff")) == result::unsupported);
 	for (unsigned i = 0; i < 16; ++i) send(p, "0a041210");
 	CHECK(p.output(hex("0a041210")) == result::malformed);
 	send(p, "4201"); CHECK(!p.pop_reply(r));
-	send(p, "4011f0d2"); CHECK(p.range == 900);
+	send(p, "4011ff3f"); CHECK(p.range == 270);
+	send(p, "401154d5"); CHECK(p.range == 900);
 	send(p, "40110000"); CHECK(p.range == 40);
 	send(p, "4011ffff"); CHECK(p.range == 1080);
+	// Every supported whole-degree request round-trips the GT5 encoder.
+	for (unsigned degrees = 40; degrees <= 1080; ++degrees)
+	{
+		const unsigned encoded = degrees * 65535 / 1080;
+		const std::array<byte, 4> command{0x40, 0x11, static_cast<byte>(encoded), static_cast<byte>(encoded >> 8)};
+		CHECK(p.output(command) == result::ok && p.range == degrees);
+	}
 	send(p, "40033700"); send(p, "40040100"); CHECK(p.autocenter_enabled && p.autocenter_strength == 55);
 	send(p, "434c"); CHECK(p.gain == 76);
 	send(p, "410f0001"); CHECK(!p.autocenter_enabled);

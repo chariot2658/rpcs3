@@ -51,8 +51,10 @@ std::span<const byte> vendor_reply(byte request)
 	static constexpr std::array<byte, 4> firmware{0x56,0,0x2f,0};
 	static constexpr std::array<byte, 16> status{0x55};
 	static constexpr std::array<byte, 64> settings{0x48};
-	static constexpr std::array<byte, 3> timing{0x42,0xe8,3};
-	static constexpr std::array<byte, 2> mode{0x4e,0x14};
+	// GT5 reads capacity at bytes 1..2, then clamps the slot count to capacity/32.
+	// Preserve the captured capacity, but advertise only slots we implement.
+	static constexpr std::array<byte, 8> capacity{0x42,0xe8,3};
+	static constexpr std::array<byte, 8> slots{0x4e,effect_slot_count};
 	switch (request)
 	{
 	case 0x47: return model;
@@ -60,8 +62,8 @@ std::span<const byte> vendor_reply(byte request)
 	case 0x56: return firmware;
 	case 0x55: return status;
 	case 0x48: return settings;
-	case 0x42: return timing;
-	case 0x4e: return mode;
+	case 0x42: return capacity;
+	case 0x4e: return slots;
 	default: return {};
 	}
 }
@@ -186,7 +188,11 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 		{
 		case 0x03: autocenter_strength = std::min<byte>(p[2], 100); return result::ok;
 		case 0x04: autocenter_enabled = p[2] != 0; return result::ok;
-		case 0x11: range = std::clamp<std::uint16_t>(le16(&p[2]) / 60, 40, 1080); return result::ok;
+		case 0x11:
+			// GT5 encodes degrees * 65535 / 1080 (0x00ADF30C). Round the
+			// inverse to recover integer degrees despite the guest's truncation.
+			range = static_cast<std::uint16_t>(std::clamp((le16(&p[2]) * 1080u + 32767u) / 65535u, 40u, 1080u));
+			return result::ok;
 		default: return result::unsupported;
 		}
 	case 0x41:

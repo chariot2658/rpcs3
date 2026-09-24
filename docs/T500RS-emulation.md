@@ -50,16 +50,19 @@ when T500RS is selected; the T500RS backend handles guest-requested gain itself.
 
 ## Implemented behavior
 
-- Direct enumeration as `044f:b65e`, including captured device/configuration/HID
-  descriptors, strings, IN `0x82`, OUT `0x01`, and 15-byte report `0x07`.
+- Direct enumeration as `044f:b65e`, with capture-derived descriptors and strings,
+  IN `0x82`, OUT `0x01`, and 32-byte input reports. The IN endpoint and HID input
+  lengths are extended from the capture for GT5's 32-byte receive-buffer copy.
 - 16-bit steering, 10-bit separate pedals, 13 button bits and 8-way hat.
   Neutral input has released pedals and hat `0x0f`; byte layout and neutral
-  polarity match the capture. Named button assignments and pedal roles still
-  need game validation; each binding can be changed in the mapper.
-- Captured vendor queries `0x42`, `0x48`, `0x49`, `0x4e`, `0x55`, `0x56`,
+  polarity match the capture. Named buttons follow GT5 2.11's recovered menu
+  mapping. Pedal roles still need driving validation; bindings remain remappable.
+- Capture-derived vendor queries `0x42`, `0x48`, `0x49`, `0x4e`, `0x55`, `0x56`,
   plus the T500 model reply to `0x47` documented by hid-tminit,
   attachment queries `0a 04 90 03`, `0a 04 12 10`, `0a 04 00 06`, queued
   report `0x14` replies, and the `41/48/0040` input-mode acknowledgement.
+  Queries `0x42`/`0x4e` return eight initialized bytes; `0x4e` advertises the
+  emulator's 16 slots instead of the captured device's 20.
 - Standard descriptor/status/configuration/interface requests; HID GET_REPORT,
   SET_REPORT, GET/SET_IDLE, GET/SET_PROTOCOL. Both HID output SET_REPORT and
   interrupt OUT feed the same decoder. The descriptor advertises report
@@ -99,7 +102,7 @@ This patch retains two explicit interpretations rather than blending fields.
 
 | Area | Evidence / limitation |
 |---|---|
-| USB identity, descriptors and neutral report | Exact bytes extracted from `plug_t500_in.pcapng`; tests compare them directly. |
+| USB identity, descriptors and neutral report | Derived from `plug_t500_in.pcapng`. Input reports are padded to 32 bytes, with matching endpoint and HID lengths, for GT5's receive-buffer copy. This extension is an emulator choice, not a physical capture. |
 | Vendor and rim identification | Captured replies, including firmware `0x2f`. These reproduce one observed firmware/rim identity. |
 | Streamed force | PR #223 packed structure: level is byte **4**, length 8. The Markdown offset table is inconsistent. |
 | MAIN timing | Both use duration at 4; PR delay at 6; Windows capture suggests delay at 7 (`0xffff` treated as no delay). Windows timing interpretation is not hardware-validated. |
@@ -110,6 +113,47 @@ This patch retains two explicit interpretations rather than blending fields.
 | Friction versus inertia versus damper | Indistinguishable in the supplied wire format; all map to damper. There are no fabricated distinct opcodes. |
 | Physical rotation stops | SDL offers no portable wheel-range command. Only guest steering input is rescaled. Set the physical range in the wheel driver. |
 | PS3 initialization | Windows enumeration is reproduced. GT5 asks for vendor request `0x47`; the T500 model reply documented by hid-tminit is now supplied. That capture came from the generic boot identity; its use after the `b65e` mode switch still needs a GT5 test. Other unknown PS3-specific requests remain logged and rejected. |
+
+### GT5 2.11 binary analysis, revision 2
+
+The user-supplied `GT5_2.11_T500RS_analysis_v2/INPUT_INIT.md` and
+`input_init_evidence.asm` trace BCAS20108 version 2.11. Addresses below are guest
+virtual addresses in that build. The instruction bytes were checked against
+the supplied analysis ELF; the executable is not part of this patch.
+
+- Decoder `0x00ADF87C` and menu mapper `0x00AA1830` establish raw button order:
+  L1, R1, Triangle, Square, Circle, Cross, Select, Start, R2, L2, L3, R3, PS.
+  The SDL adapter now follows that order, with shift-down/up mapped to L1/R1.
+  Previously, for example, a mapped Cross press sent raw bit 1 (GT5 R1);
+  it now sends bit 5 (GT5 Cross).
+- Callback `0x00AE1478` copies all 32 bytes of its receive buffer. All input
+  reports now initialize and return 32 bytes when requested. The original
+  first 15 bytes are retained, including the captured identification word.
+  Short reads remain bounded; endpoint addresses stay `0x82` and `0x01`.
+- Query consumer `0x00AE23D0` reads capacity from `0x42`, slot count from
+  `0x4e`, and the report-handling profile from `0x47`. Eight-byte query replies
+  prevent stale tails; the slot count is capped to the 16 implemented slots.
+  Capacity 1000 and profile 3 are retained from the existing replies.
+- Setter `0x00ADF30C` encodes range as `degrees * 65535 / 1080`. The inverse
+  now uses that scale and rounds to whole degrees, instead of dividing by 60.
+  For example, `40 11 54 D5` now selects 900 degrees rather than 910.
+  This applies with either FFB interpretation. No speculative range notification
+  is queued: GT5 already stores its requested range, and an arbitrary echoed
+  code would trigger the callback's 270-degree fallback.
+- A new SET_CONFIGURATION, including reselecting configuration 1, clears
+  effects and pending identification replies to start a fresh session.
+
+The analysis confirms the existing readiness sequence: nonzero `0x47` selects
+the branch where `0x14` sets ready, and subsequent `0x07` reports publish
+controls. The fixed `0A 04 90 03 ...` output already queues the captured `0x14`
+reply. Early `0x07` polling is retained; it cannot itself set GT5 ready. The
+reference model's synthetic zero identification word and alternative endpoint
+addresses are unnecessary for this implementation.
+
+These findings support input/startup corrections, not a complete GT5 FFB
+decoder. Commands `0x81`, effect types `0x01/0x07/0x08`, and start value `0x01`
+seen in the user's earlier trace remain unsupported. Game input, driving
+pedal names, FFB fidelity and other game versions still require runtime tests.
 
 Not included: the initial `b65d` boot personality, firmware programming,
 standalone TH8RS/TH8A gear-shifter USB emulation, F1-rim variants, or a physical
@@ -156,8 +200,8 @@ testing. The GUI log display filter alone does not enable these channels.
 GT5 2.11 has been observed attaching to `044f:b65e` and continuously polling
 input. The first traced run showed vendor request `0x47`, OUT command `0x81`,
 effect identifiers `0x01/0x07/0x08`, and start value `0x01`. The `0x47` reply is
-now implemented; the other commands remain unsupported, and a GT5 retest is
-needed to determine whether the reply enables game input.
+now implemented along with the revision-2 input corrections above; the other
+commands remain unsupported. A GT5 retest is needed to confirm usable input.
 
 ### Focused tests
 
@@ -172,6 +216,12 @@ UndefinedBehaviorSanitizer. It covers captured descriptor/input bytes,
 initialization replies, constant and periodic uploads, parameters-before-MAIN,
 stream offsets, negative saturation, all 16 slots, per-slot START/STOP,
 truncation, and 100,000 deterministic random packets. This passed.
+
+Revision-2 regressions additionally check HID input/output lengths, zero-padded
+reports, eight-byte vendor replies, and every integer range from 40 to 1080
+degrees against GT5's encoder. The mocked integration suite replays GT5's
+startup in both initialization-output orders, checks reconfiguration, and
+exercises all 13 named SDL button bindings against the recovered wire masks.
 
 Development also compiled the real modified `LogitechG27.cpp` and new SDL
 adapter against RPCS3's pinned SDL headers, with explicit test-only RPCS3

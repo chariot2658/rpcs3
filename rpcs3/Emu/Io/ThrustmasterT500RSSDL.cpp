@@ -67,11 +67,9 @@ void usb_device_logitech_g27::control_t500rs(u8 request_type, u8 request, u16 va
 	else if (request_type == 0x00 && request == LIBUSB_REQUEST_SET_CONFIGURATION && index == 0 && value <= 1 && length == 0)
 	{
 		set_configuration(static_cast<u8>(value));
-		if (!value)
-		{
-			const std::lock_guard lock(m_t500rs_mutex);
-			m_t500rs.reset();
-		}
+		// SET_CONFIGURATION starts a fresh USB session, including reselecting 1.
+		const std::lock_guard lock(m_t500rs_mutex);
+		m_t500rs.reset();
 		return;
 	}
 	else if ((request_type == 0x01 || request_type == 0x00) && request == LIBUSB_REQUEST_SET_INTERFACE && value == 0 && index == 0 && length == 0)

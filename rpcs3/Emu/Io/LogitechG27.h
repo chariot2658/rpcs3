@@ -129,7 +129,7 @@ private:
 	void init_t500rs();
 	void control_t500rs(u8 request_type, u8 request, u16 value, u16 index, u16 length, u32 size, u8* data, UsbTransfer* transfer);
 	void interrupt_t500rs(u32 size, u8* data, u32 endpoint, UsbTransfer* transfer);
-	t500rs::input_report input_t500rs(u32 requested_size = 15) const;
+	t500rs::input_report input_t500rs(u32 requested_size = 32) const;
 	void trace_t500rs_input(const t500rs::input& state, const std::array<s16, 4>& axes, bool allowed, u16 range, u32 requested_size, const t500rs::input_report& report) const;
 	t500rs::result output_t500rs(std::span<const u8> data);
 	void update_t500rs_haptics();
