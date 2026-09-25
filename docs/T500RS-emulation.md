@@ -1,10 +1,10 @@
 # Experimental Thrustmaster T500RS USB emulation
 
 This patch adds a selectable T500RS guest identity backed by RPCS3's existing
-SDL wheel mappings. It is a substantial implementation, **not a verified GT5
-compatibility fix**. No PS3 game, physical wheel, or complete RPCS3 build was
-available during development. USB/protocol tests and mocked host integration
-checks are described below.
+SDL wheel mappings. A user test confirms GT5 2.11 buttons and steering; the
+reported pedal exchange is corrected. PS3 force feedback is now implemented
+experimentally, **not yet verified on a physical wheel**. Earlier revisions
+built on GitHub Actions. Protocol and mocked host checks are described below.
 
 ## Apply and configure
 
@@ -35,6 +35,7 @@ There is no prebuilt executable in this package.
 6. Start with **Captured Windows firmware** protocol. This uses captured USB
    field positions. The alternative **hid-tmff2 reference driver** follows the
    differing PR #223 encoder, including its streamed periodic/ramp carrier.
+   These are PC fallbacks; GT5's PS3 FFB format is detected automatically.
 7. Save and restart the game. Only the selected guest wheel is instantiated.
    As with existing wheel emulation, map the wheel here rather than also
    exposing the same inputs as an emulated gamepad.
@@ -69,8 +70,11 @@ when T500RS is selected; the T500RS backend handles guest-requested gain itself.
   interrupt OUT feed the same decoder. The descriptor advertises report
   protocol only; boot-protocol requests are rejected.
 - 16 independent hardware slots, parameter/envelope staging before MAIN,
-  upload/live update/start/stop/reset, subtype low-byte wrap for higher slots,
-  gain, autocenter and software steering-range scaling.
+  upload/live update/start/stop/reset, PC subtype low-byte wrap or full PS3
+  references, gain, autocenter and software steering-range scaling.
+- Automatically detected PS3 constant (type 1), spring (7), damper (8),
+  START value 1, 0..128 gain, and independent opcode-81 direct X force.
+  GT5 timing and signed force/condition scales follow its recovered builders.
 - Native constant force, spring and the shared `0x41` condition family. The
   latter is represented by SDL damper: the reference puts damper, friction and
   inertia on the **same** wire type and does not provide a discriminator.
@@ -99,7 +103,9 @@ when T500RS is selected; the T500RS backend handles guest-requested gain itself.
 
 The earlier assumption that the PR fully specifies the real wheel is too
 strong. The PR encoder and the author's archived Windows USB packets disagree.
-This patch retains two explicit interpretations rather than blending fields.
+This patch retains two explicit PC interpretations rather than blending fields.
+GT5's PS3 format is decoded separately; the PC uncertainties below do not
+override the PS3 evidence in `T500RS-GT5-FFB-next.md`.
 
 | Area | Evidence / limitation |
 |---|---|
@@ -113,7 +119,7 @@ This patch retains two explicit interpretations rather than blending fields.
 | Condition deadband | `/65` in the reference is itself marked unconfirmed. The inverse is bounded and tested but not physically calibrated. |
 | Friction versus inertia versus damper | Indistinguishable in the supplied wire format; all map to damper. There are no fabricated distinct opcodes. |
 | Physical rotation stops | SDL offers no portable wheel-range command. Only guest steering input is rescaled. Set the physical range in the wheel driver. |
-| PS3 initialization | Windows enumeration is reproduced. GT5 asks for vendor request `0x47`; the T500 model reply documented by hid-tminit is now supplied. That capture came from the generic boot identity; its use after the `b65e` mode switch still needs a GT5 test. Other unknown PS3-specific requests remain logged and rejected. |
+| PS3 initialization | GT5 asks for vendor request `0x47`; the T500 model reply documented by hid-tminit is supplied. A subsequent user test confirms working buttons and steering. Other unknown PS3-specific requests remain logged and rejected. |
 
 ### GT5 2.11 binary analysis, revision 2
 
@@ -157,10 +163,12 @@ channel 1 is throttle. The report encoder now uses that order; the host mapper
 and configuration labels keep their usual meanings. This corrects the reported
 throttle/brake exchange without asking users to swap their bindings.
 
-These findings support input/startup corrections, not a complete GT5 FFB
-decoder. Commands `0x81`, effect types `0x01/0x07/0x08`, and start value `0x01`
-seen in the user's trace remain unsupported. The corrected pedal order, clutch,
-FFB fidelity and other game versions still require runtime tests.
+Further tracing of the force wrappers and named field tables now supports
+commands `0x81`, effect types `0x01/0x07/0x08`, and start value `0x01` seen in
+the user's trace. See `T500RS-GT5-FFB-next.md` for addresses, scaling, lifecycle
+and limitations. PS3 periodic effects, nonzero direction, finite repeat
+intervals and iteration counts other than 1 remain unsupported. Corrected
+pedal order, clutch, FFB fidelity and other game versions require runtime tests.
 
 Not included: the initial `b65d` boot personality, firmware programming,
 standalone TH8RS/TH8A gear-shifter USB emulation, F1-rim variants, or a physical
@@ -170,8 +178,8 @@ reported; interrupt input is still refreshed at the endpoint polling interval.
 
 A real T500RS is **not required** to test this with an ordinary SDL-compatible
 wheel. The user's GT5 2.11 retest confirms working buttons and steering;
-throttle/brake were exchanged and are corrected here. Force feedback remains
-unimplemented for GT5's PS3 command format; see the diagnostic procedure below.
+throttle/brake were exchanged and are corrected here. Experimental PS3 force
+feedback now needs a low-strength driving test; see the diagnostic procedure below.
 
 ## Validation
 
@@ -207,9 +215,13 @@ testing. The GUI log display filter alone does not enable these channels.
 GT5 2.11 has been observed attaching to `044f:b65e` and continuously polling
 input. The first traced run showed vendor request `0x47`, OUT command `0x81`,
 effect identifiers `0x01/0x07/0x08`, and start value `0x01`. The `0x47` reply is
-now implemented along with the revision-2 input corrections above; the other
-commands remain unsupported. A later user test confirmed usable buttons and
-steering. See `T500RS-GT5-FFB-next.md` for the driving trace and remaining FFB work.
+now implemented along with the revision-2 input corrections above and those
+PS3 force commands. A later user test confirmed usable buttons and steering.
+The FFB decoder accepts all 1,254 OUT packets in the driving log. New trace
+messages show host effect create/update/run results, PS3 detection and haptic
+capabilities; a warning identifies a missing host haptic handle. For the first
+FFB test, reduce strength in the physical wheel driver, keep hands clear on
+startup, and verify forces stop on pause/exit. Preserve the log after exiting.
 
 ### Focused tests
 
@@ -230,6 +242,13 @@ reports, eight-byte vendor replies, and every integer range from 40 to 1080
 degrees against GT5's encoder. The mocked integration suite replays GT5's
 startup in both initialization-output orders, checks reconfiguration, and
 exercises all 13 named SDL button bindings against the recovered wire masks.
+
+PS3 FFB regressions cover initial and active declarations, signed scales,
+full references for upper slots, finite duration/delay, envelopes, independent
+direct force, and existing PC fallback behavior. Mocked SDL tests cover GT5's
+three simultaneous effects, live updates, gain, pause, failures, unsupported
+host effects, deconfiguration and detach. These passed with ASan/UBSan using
+GCC 12.2 under WSL; `-no-pie` avoided intermittent ASan startup crashes there.
 
 Development also compiled the real modified `LogitechG27.cpp` and new SDL
 adapter against RPCS3's pinned SDL headers, with explicit test-only RPCS3

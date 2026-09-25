@@ -74,6 +74,7 @@ void protocol::stop_all()
 {
 	for (auto& s : effect_slots)
 		s.playing = false;
+	direct_slot.playing = false;
 	autocenter_enabled = false;
 }
 
@@ -117,6 +118,7 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 	case 0x0a: required = 4; break;
 	case 0x40: case 0x41: required = 4; break;
 	case 0x42: case 0x43: required = 2; break;
+	case 0x81: required = 3; break;
 	default: return result::unsupported;
 	}
 	if (p.size() < required)
@@ -126,26 +128,39 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 	{
 	case 0x01:
 	{
-		if (p[1] >= effect_slots.size() || p[3] != 0x40)
+		if (p[1] >= effect_slots.size())
+			return result::malformed;
+		const bool ps3 = p[2] == 1 || p[2] == 7 || p[2] == 8;
+		if (ps3)
+		{
+			// GT5: flags 00 for initial declarations, 40 for active effects.
+			// Byte 6 is direction, 7..8 repeat interval, 13..14 start delay.
+			// Only the single-axis, non-repeating form is implemented here.
+			if ((p[3] != 0 && p[3] != 0x40) || p[6] != 0 || (le16(&p[7]) != 0 && le16(&p[7]) != 0xffff))
+				return result::unsupported;
+		}
+		else if (p[3] != 0x40)
 			return result::malformed;
 		const bool periodic = p[2] >= 0x20 && p[2] <= 0x24;
-		if (p[2] != 0 && p[2] != 0x40 && p[2] != 0x41 && !periodic)
+		if (!ps3 && p[2] != 0 && p[2] != 0x40 && p[2] != 0x41 && !periodic)
 			return result::unsupported;
 		if (format == dialect::linux_reference && periodic && (p[2] != 0x22 || p[1] != 0 || le16(&p[9]) != 0x0e))
 			return result::unsupported;
-		// Parameter commands carry the low byte only, including hardware slots 9..15.
-		const auto parameter = static_cast<byte>(le16(&p[9]));
-		const auto envelope = static_cast<byte>(le16(&p[11]));
-		if (parameter == envelope)
+		// PC parameter commands wrap to the low byte; PS3 uses the full reference.
+		const std::uint16_t parameter = ps3 ? le16(&p[9]) : static_cast<byte>(le16(&p[9]));
+		const std::uint16_t envelope = ps3 ? le16(&p[11]) : static_cast<byte>(le16(&p[11]));
+		if (parameter == envelope || parameter >= m_parameters.size() || envelope >= m_envelopes.size())
 			return result::malformed;
+		m_ps3 |= ps3;
 		auto& s = effect_slots[p[1]];
-		const bool changed = !s.declared || s.type != p[2] || s.parameter != parameter || s.envelope != envelope;
+		const bool changed = !s.declared || s.ps3 != ps3 || s.type != p[2] || s.parameter != parameter || s.envelope != envelope;
 		s.declared = true;
+		s.ps3 = ps3;
 		s.type = p[2];
 		s.parameter = parameter;
 		s.envelope = envelope;
 		s.duration = le16(&p[4]);
-		s.delay = le16(&p[format == dialect::linux_reference ? 6 : 7]);
+		s.delay = le16(&p[ps3 ? 13 : format == dialect::linux_reference ? 6 : 7]);
 		if (s.delay == 0xffff)
 			s.delay = 0;
 		if (changed)
@@ -156,16 +171,27 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 		return result::ok;
 	}
 	case 0x02:
-		std::copy_n(p.begin(), 9, m_envelopes[p[1]].begin());
+		if (m_ps3 && le16(&p[1]) >= m_envelopes.size())
+			return result::malformed;
+		if (!m_ps3)
+			std::copy_n(p.begin(), 9, m_envelopes[p[1]].begin());
+		// Also stage the full reference before the first PS3 MAIN identifies
+		// the dialect. Legacy Linux uses byte 2 for attack length instead.
+		if (le16(&p[1]) < m_envelopes.size())
+			std::copy_n(p.begin(), 9, m_envelopes[le16(&p[1])].begin());
 		return result::ok;
 	case 0x03: case 0x04: case 0x05:
 	{
-		if (format == dialect::linux_reference && p[0] == 4 && (p[1] != 0x0e || le16(&p[6]) != 0x2710))
+		if (!m_ps3 && format == dialect::linux_reference && p[0] == 4 && (p[1] != 0x0e || le16(&p[6]) != 0x2710))
 			return result::unsupported;
-		auto& param = m_parameters[p[1]];
+		if (m_ps3 && le16(&p[1]) >= m_parameters.size())
+			return result::malformed;
+		auto& param = m_parameters[m_ps3 ? le16(&p[1]) : p[1]];
 		param = {};
 		param.type = p[0];
 		std::copy_n(p.begin(), required, param.data.begin());
+		if (!m_ps3 && le16(&p[1]) < m_parameters.size())
+			m_parameters[le16(&p[1])] = param;
 		return result::ok;
 	}
 	case 0x0a:
@@ -208,9 +234,11 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 			if (p[1] == 15)
 				autocenter_enabled = false;
 		}
-		else if (p[2] == 0x41)
+		else if (p[2] == (s.ps3 ? 1 : 0x41))
 		{
 			if (!s.declared)
+				return result::unsupported;
+			if (s.ps3 && p[3] != 1)
 				return result::unsupported;
 			s.playing = true;
 			s.started_at_us = now_us;
@@ -228,6 +256,25 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 		default: return result::unsupported;
 		}
 	case 0x43: gain = p[1]; return result::ok;
+	case 0x81:
+	{
+		// GT5 FORCE_X/Y, signed -127..127 (builder 0x00AE1EE0).
+		// A steering wheel renders only X; Y has no physical axis.
+		m_ps3 = true;
+		m_direct_level = force(signed_byte(p[1]), 127);
+		if (!direct_slot.declared)
+		{
+			direct_slot.declared = true;
+			direct_slot.generation = ++m_serial;
+		}
+		if (m_direct_level && !direct_slot.playing)
+		{
+			direct_slot.starts = ++m_serial;
+			direct_slot.started_at_us = now_us;
+		}
+		direct_slot.playing = m_direct_level != 0;
+		return result::ok;
+	}
 	default: return result::unsupported;
 	}
 }
@@ -235,6 +282,12 @@ result protocol::output(std::span<const byte> p, std::uint64_t now_us)
 effect protocol::decode(std::size_t index, bool reverse) const
 {
 	effect out{};
+	if (index == effect_slots.size() && direct_slot.declared)
+	{
+		out.kind = effect_kind::constant;
+		out.level = reverse ? -m_direct_level : m_direct_level;
+		return out;
+	}
 	if (index >= effect_slots.size() || !effect_slots[index].declared)
 		return out;
 	const auto& s = effect_slots[index];
@@ -242,6 +295,38 @@ effect protocol::decode(std::size_t index, bool reverse) const
 	const auto& p = param.data;
 	const auto& env = m_envelopes[s.envelope];
 	const int sign = reverse ? -1 : 1;
+	if (s.ps3)
+	{
+		// Recovered GT5 wrappers normalize +/-10000 into these wire ranges.
+		// Zero-duration initialization declarations must never create torque.
+		if (!s.duration)
+			return out;
+		out.length = s.duration == 0xffff ? 0xffffffffu : s.duration;
+		out.delay = s.delay;
+		if (s.type == 1 && param.type == 3)
+		{
+			out.kind = effect_kind::constant;
+			out.level = force(signed_byte(p[3]) * sign, 127);
+			if (env[0] == 2)
+			{
+				out.attack_length = le16(&env[3]);
+				out.attack_level = force(std::min<int>(env[5], 127), 127);
+				out.fade_length = le16(&env[6]);
+				out.fade_level = force(std::min<int>(env[8], 127), 127);
+			}
+		}
+		else if ((s.type == 7 || s.type == 8) && param.type == 5)
+		{
+			out.kind = s.type == 7 ? effect_kind::spring : effect_kind::damper;
+			out.right_coeff = force(signed_byte(p[3]) * sign, 100);
+			out.left_coeff = force(signed_byte(p[4]) * sign, 100);
+			out.center = force(signed_word(&p[5]), 500);
+			out.deadband = static_cast<std::uint16_t>(std::min<unsigned>(le16(&p[7]), 1000) * 65535 / 1000);
+			out.right_sat = static_cast<std::uint16_t>(std::min<unsigned>(p[9], 100) * 65535 / 100);
+			out.left_sat = static_cast<std::uint16_t>(std::min<unsigned>(p[10], 100) * 65535 / 100);
+		}
+		return out;
+	}
 	const bool reference_mode = format == dialect::linux_reference;
 	const bool stream = param.type == 4 && s.type == 0x22 &&
 		(reference_mode || (index == 0 && s.duration == 0xffff && p[3] == 0 && le16(&p[6]) == 0x2710));
