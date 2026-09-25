@@ -158,11 +158,12 @@ private:
 		bool playing = false;
 		bool failed = false;
 	};
-	std::array<t500rs_host_slot, 16> m_t500rs_host_slots{};
+	std::array<t500rs_host_slot, t500rs::effect_slot_count + 1> m_t500rs_host_slots{};
 	int m_t500rs_gain = -1;
 	int m_t500rs_autocenter = -1;
 	int m_t500rs_autocenter_id = -1;
 	bool m_t500rs_muted = false;
+	bool m_t500rs_missing_haptic_warned = false;
 	u16 m_t500rs_host_range = 1080;
 	SDL_HapticDirection m_t500rs_direction{};
 	std::array<u8, 256> m_t500rs_idle{};
