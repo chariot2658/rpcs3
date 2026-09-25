@@ -82,9 +82,10 @@ struct slot
 {
 	bool declared = false;
 	bool playing = false;
+	bool ps3 = false;
 	byte type = 0;
-	byte parameter = 0;
-	byte envelope = 0;
+	std::uint16_t parameter = 0;
+	std::uint16_t envelope = 0;
 	std::uint16_t duration = 0xffff;
 	std::uint16_t delay = 0;
 	// A serial preserves STOP/START and reset/redeclare transitions coalesced by the worker.
@@ -105,6 +106,10 @@ public:
 	bool enable_input_reporting() { return queue_reply(input_report{2, 0xff, 0x3f}); }
 	input_report last_identification{};
 	std::array<slot, effect_slot_count> effect_slots{};
+	// Opcode 81 is a separate persistent X/Y force, not a numbered effect.
+	slot direct_slot{};
+	bool ps3_active() const { return m_ps3; }
+	unsigned gain_limit() const { return m_ps3 ? 128 : 255; }
 	dialect format;
 	byte gain = 255;
 	bool autocenter_enabled = false;
@@ -117,8 +122,11 @@ private:
 		std::array<byte, 11> data{};
 		byte type = 0;
 	};
-	std::array<parameters, 256> m_parameters{};
-	std::array<std::array<byte, 9>, 256> m_envelopes{};
+	// PS3 uses full LE16 references, with two 16-byte channels per slot.
+	std::array<parameters, effect_slot_count * 32> m_parameters{};
+	std::array<std::array<byte, 9>, effect_slot_count * 32> m_envelopes{};
+	bool m_ps3 = false;
+	std::int16_t m_direct_level = 0;
 	std::array<input_report, 16> m_replies{};
 	std::size_t m_reply_head = 0;
 	std::size_t m_reply_count = 0;

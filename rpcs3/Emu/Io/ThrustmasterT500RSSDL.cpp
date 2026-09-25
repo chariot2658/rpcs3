@@ -23,7 +23,7 @@ void usb_device_logitech_g27::init_t500rs()
 		conf.add_node(UsbDescriptorNode(config[i], config[i + 1], config.data() + i + 2));
 	add_string("Thrustmaster");
 	add_string("TRS Racing wheel");
-	t500rs_log.notice("Experimental T500RS emulation enabled (%s protocol); PS3 initialization still requires game validation",
+	t500rs_log.notice("Experimental T500RS emulation enabled (%s fallback); PS3 force-feedback protocol is detected automatically",
 		g_cfg_logitech_g27.t500rs_protocol.get() ? "hid-tmff2" : "captured Windows");
 }
 
@@ -209,7 +209,10 @@ t500rs::result usb_device_logitech_g27::output_t500rs(std::span<const u8> data)
 {
 	const std::lock_guard lock(m_t500rs_mutex);
 	t500rs_log.trace("OUT: %s", fmt::buf_to_hexstring(data.data(), data.size()));
+	const bool was_ps3 = m_t500rs.ps3_active();
 	const auto result = m_t500rs.output(data, get_timestamp());
+	if (!was_ps3 && m_t500rs.ps3_active())
+		t500rs_log.notice("Detected PS3 force-feedback protocol: constant/spring/damper, 128-step gain");
 	t500rs_log.trace("OUT result=%u (0=ok, 1=malformed, 2=unsupported)", static_cast<u32>(result));
 	if (result != t500rs::result::ok)
 	{
@@ -332,7 +335,13 @@ void usb_device_logitech_g27::update_t500rs_haptics()
 	}
 	const std::lock_guard lock(m_sdl_handles_mutex);
 	if (!m_haptic_handle)
+	{
+		if (!m_t500rs_missing_haptic_warned)
+			t500rs_log.warning("No SDL haptic device is open; T500RS input works but host force feedback is unavailable");
+		m_t500rs_missing_haptic_warned = true;
 		return;
+	}
+	m_t500rs_missing_haptic_warned = false;
 	const bool muted = !m_steering_device_present || !is_input_allowed() || Emu.IsPaused() || Emu.IsStopped();
 	if (muted)
 	{
@@ -351,11 +360,15 @@ void usb_device_logitech_g27::update_t500rs_haptics()
 	// Reset host gain once to avoid unintentionally multiplying an inherited value.
 	if (m_t500rs_gain < 0)
 	{
+		t500rs_log.notice("Host FFB ready: SDL features=0x%x direction=%u reverse=%d",
+			SDL_GetHapticFeatures(m_haptic_handle), m_t500rs_direction.type, m_reverse_effects);
 		if (SDL_GetHapticFeatures(m_haptic_handle) & SDL_HAPTIC_GAIN)
 			SDL_SetHapticGain(m_haptic_handle, 100);
 		m_t500rs_gain = 100;
 	}
-	const int autocenter = snapshot.autocenter_enabled ? snapshot.autocenter_strength * snapshot.gain / 255 : 0;
+	const unsigned gain_limit = snapshot.gain_limit();
+	const unsigned gain = std::min<unsigned>(snapshot.gain, gain_limit);
+	const int autocenter = snapshot.autocenter_enabled ? snapshot.autocenter_strength * gain / gain_limit : 0;
 	if (autocenter != m_t500rs_autocenter)
 	{
 		if (SDL_GetHapticFeatures(m_haptic_handle) & SDL_HAPTIC_AUTOCENTER)
@@ -389,9 +402,9 @@ void usb_device_logitech_g27::update_t500rs_haptics()
 	}
 
 	const u64 now = get_timestamp();
-	for (std::size_t i = 0; i < snapshot.effect_slots.size(); ++i)
+	for (std::size_t i = 0; i < m_t500rs_host_slots.size(); ++i)
 	{
-		const auto& s = snapshot.effect_slots[i];
+		const auto& s = i == snapshot.effect_slots.size() ? snapshot.direct_slot : snapshot.effect_slots[i];
 		auto& h = m_t500rs_host_slots[i];
 		auto effect = snapshot.decode(i, m_reverse_effects);
 		const bool expired = effect.length != SDL_HAPTIC_INFINITY && s.playing && now >= s.started_at_us &&
@@ -411,7 +424,7 @@ void usb_device_logitech_g27::update_t500rs_haptics()
 			h.generation = s.generation;
 			continue;
 		}
-		const auto scale = [&](auto value) { return static_cast<decltype(value)>(static_cast<int>(value) * snapshot.gain / 255); };
+		const auto scale = [&](auto value) { return static_cast<decltype(value)>(static_cast<int>(value) * static_cast<int>(gain) / static_cast<int>(gain_limit)); };
 		effect.level = scale(effect.level);
 		effect.magnitude = scale(effect.magnitude);
 		effect.offset = scale(effect.offset);
@@ -455,13 +468,20 @@ void usb_device_logitech_g27::update_t500rs_haptics()
 			if (SDL_HapticEffectSupported(m_haptic_handle, &native))
 				h.id = SDL_CreateHapticEffect(m_haptic_handle, &native);
 			ok = h.id >= 0;
+			t500rs_log.trace("Host FFB create: slot=%u kind=%u id=%d ok=%d", static_cast<u32>(i), native.type, h.id, ok);
 		}
 		else if (!(effect == h.last) || h.failed)
+		{
 			ok = SDL_UpdateHapticEffect(m_haptic_handle, h.id, &native);
+			t500rs_log.trace("Host FFB update: slot=%u ok=%d level=%d coeff=[%d,%d] center=%d saturation=[%u,%u] gain=%u/%u",
+				static_cast<u32>(i), ok, effect.level, effect.right_coeff, effect.left_coeff, effect.center,
+				effect.right_sat, effect.left_sat, gain, gain_limit);
+		}
 		if (ok && (!h.playing || h.starts != s.starts))
 		{
 			if (h.playing) SDL_StopHapticEffect(m_haptic_handle, h.id);
 			ok = SDL_RunHapticEffect(m_haptic_handle, h.id, 1);
+			t500rs_log.trace("Host FFB run: slot=%u id=%d ok=%d length=%u delay=%u", static_cast<u32>(i), h.id, ok, effect.length, effect.delay);
 			h.playing = ok;
 			h.starts = s.starts;
 		}

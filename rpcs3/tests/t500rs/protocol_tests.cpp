@@ -207,10 +207,86 @@ void linux_stream_and_conditions()
 	p.reset(); CHECK(p.decode(0).kind == effect_kind::none && p.format == dialect::linux_reference);
 }
 
+void gt5_force_feedback()
+{
+	// Startup and driving commands from the user's GT5 2.11 trace.
+	// Automatic PS3 detection must work with either configured PC fallback.
+	for (const auto fallback : {dialect::windows_capture, dialect::linux_reference})
+	{
+		protocol p(fallback);
+		send(p, "4380");
+		send(p, "810000");
+		CHECK(p.ps3_active() && p.gain_limit() == 128 && !p.direct_slot.playing);
+		send(p, "021000000000000000");
+		send(p, "03000000");
+		send(p, "010001000000000000000010000000");
+		send(p, "0520000000000000000000");
+		send(p, "0530000000000000000000");
+		send(p, "010107000000000000200030000000");
+		send(p, "0540000000000000000000");
+		send(p, "0550000000000000000000");
+		send(p, "010208000000000000400050000000");
+		CHECK(p.decode(0).kind == effect_kind::none && !p.effect_slots[1].playing);
+		send(p, "0520001919000000001212");
+		send(p, "01010740ffff00ffff200030000000");
+		send(p, "41010101", 1000);
+		CHECK(p.effect_slots[1].playing && p.decode(1).kind == effect_kind::spring);
+		CHECK(p.decode(1).right_coeff == 25 * 32767 / 100 && p.decode(1).right_sat == 18 * 65535 / 100);
+		const auto starts = p.effect_slots[1].starts;
+		send(p, "0520002e2efeff00002424");
+		CHECK(p.effect_slots[1].starts == starts && p.decode(1).center == -2 * 32767 / 500);
+		CHECK(p.decode(1).left_coeff == 46 * 32767 / 100);
+		send(p, "01000140ffff00ffff000010000000");
+		send(p, "030000ff"); send(p, "41000101", 2000);
+		CHECK(p.decode(0).kind == effect_kind::constant && p.decode(0).level == -32767 / 127);
+		send(p, "01020840ffff00ffff400050000000");
+		send(p, "0540006432f401e8036432"); send(p, "41020101", 2000);
+		const auto e = p.decode(2);
+		CHECK(e.kind == effect_kind::damper && e.right_coeff == 32767 && e.left_coeff == 16383);
+		CHECK(e.center == 32767 && e.deadband == 65535 && e.right_sat == 65535 && e.left_sat == 32767);
+		CHECK(p.decode(2, true).right_coeff == -32767);
+		send(p, "0550000000000000000000");
+		CHECK(p.decode(2) == e); // Y parameters must not replace steering X.
+		send(p, "41010001"); send(p, "41010101", 3000);
+		CHECK(p.effect_slots[1].starts != starts && p.effect_slots[0].playing && p.effect_slots[2].playing);
+		// Signed extremes and malformed values remain bounded.
+		send(p, "03000080"); CHECK(p.decode(0).level == -32767 && p.decode(0, true).level == 32767);
+		// Full LE16 addresses: slot 8 is independent of slot 0.
+		send(p, "0300017f"); send(p, "021001640040c80020");
+		send(p, "01080140e80300ffff00011001fa00"); send(p, "41080101");
+		const auto high = p.decode(8);
+		CHECK(high.level == 32767 && p.decode(0).level == -32767);
+		CHECK(high.length == 1000 && high.delay == 250 && high.attack_length == 100 && high.fade_length == 200);
+		CHECK(high.attack_level == 64 * 32767 / 127 && high.fade_level == 32 * 32767 / 127);
+		CHECK(p.output(hex("0300027f")) == result::malformed);
+		CHECK(p.output(hex("021002000000000000")) == result::malformed);
+		CHECK(p.output(hex("01080140ffff00ffff000210020000")) == result::malformed);
+		CHECK(p.output(hex("01000140ffff000100000010000000")) == result::unsupported);
+		CHECK(p.output(hex("410001ff")) == result::unsupported);
+		// Direct force has a separate lifecycle; it never overwrites slot 0.
+		send(p, "814000", 4000);
+		CHECK(p.direct_slot.playing && p.decode(16).level == 64 * 32767 / 127 && p.decode(0).level == -32767);
+		const auto direct_start = p.direct_slot.starts;
+		send(p, "81c000", 5000); CHECK(p.direct_slot.starts == direct_start && p.decode(16).level < 0);
+		send(p, "81007f"); CHECK(!p.direct_slot.playing && p.effect_slots[0].playing);
+		p.stop_all(); CHECK(!p.direct_slot.playing && !p.effect_slots[0].playing);
+		p.reset(); CHECK(!p.ps3_active() && p.gain_limit() == 255 && p.decode(16).kind == effect_kind::none);
+	}
+	// Parameters may precede the first MAIN that identifies PS3 format.
+	protocol staged;
+	send(staged, "03000140"); send(staged, "01080140ffff00ffff000110010000");
+	CHECK(staged.ps3_active() && staged.decode(8).level == 64 * 32767 / 127);
+	// Preserve Linux's different envelope layout (byte 2 is attack length).
+	protocol legacy(dialect::linux_reference);
+	send(legacy, "021c0a007f14007f00"); send(legacy, "030e007f");
+	send(legacy, "01000040ffff0000000e001c000000");
+	CHECK(legacy.decode(0).attack_length == 10 && legacy.decode(0).fade_length == 20);
+}
+
 void malformed_and_fuzz()
 {
 	protocol p;
-	for (const auto text : {"01000040ffff0000000e001c000000", "021c00000000000000", "030e007f", "040e000001001027", "052a000a05000000006464", "0a049003", "4011f0d2", "41000001", "4205", "43ff"})
+	for (const auto text : {"01000040ffff0000000e001c000000", "021c00000000000000", "030e007f", "040e000001001027", "052a000a05000000006464", "0a049003", "4011f0d2", "41000001", "4205", "43ff", "810000"})
 	{
 		const auto packet = hex(text);
 		for (std::size_t length = 0; length < packet.size(); ++length)
@@ -233,6 +309,6 @@ void malformed_and_fuzz()
 
 int main()
 {
-	enumeration_and_input(); gt5_pedal_order(); initialization(); captured_constant_and_periodic(); linux_stream_and_conditions(); malformed_and_fuzz();
+	enumeration_and_input(); gt5_pedal_order(); initialization(); captured_constant_and_periodic(); linux_stream_and_conditions(); gt5_force_feedback(); malformed_and_fuzz();
 	std::cout << "PASS: descriptors, input, captured initialization, FFB lifecycle, 16 slots, truncation and 100000 fuzz packets\n";
 }
