@@ -18,6 +18,8 @@ jobs:
     if: github.repository == 'chariot2658/rpcs3'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      HAS_REBASE_TOKEN: ${{ secrets.REBASE_TOKEN != '' }}
 
     steps:
       - name: Checkout t500rs
@@ -25,6 +27,10 @@ jobs:
         with:
           ref: t500rs
           fetch-depth: 0
+          # GITHUB_TOKEN can never push commits that touch .github/workflows/,
+          # which upstream rebases regularly do. REBASE_TOKEN must be a PAT with
+          # Contents + Workflows write access to this repository.
+          token: ${{ secrets.REBASE_TOKEN || github.token }}
 
       - name: Rebase onto RPCS3 master
         id: rebase
@@ -52,9 +58,10 @@ jobs:
           echo 'rebased=true' >> "$GITHUB_OUTPUT"
 
       # Pushes made with GITHUB_TOKEN do not start another workflow, so dispatch
-      # the Windows build explicitly after a successful automated rebase.
+      # the Windows build explicitly after a successful automated rebase. A push
+      # made with REBASE_TOKEN already triggers the build via its push event.
       - name: Trigger Windows x64 build
-        if: steps.rebase.outputs.rebased == 'true'
+        if: steps.rebase.outputs.rebased == 'true' && env.HAS_REBASE_TOKEN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run windows-x64.yml --repo "$GITHUB_REPOSITORY" --ref t500rs
