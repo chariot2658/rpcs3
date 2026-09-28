@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Standalone tests; no RPCS3/SDL dependencies. See run_tests.sh.
 #include "../../Emu/Io/ThrustmasterT500RS.h"
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <random>
@@ -244,7 +245,8 @@ void gt5_force_feedback()
 		const auto e = p.decode(2);
 		CHECK(e.kind == effect_kind::damper && e.right_coeff == 32767 && e.left_coeff == 16383);
 		CHECK(e.center == 32767 && e.deadband == 65535 && e.right_sat == 65535 && e.left_sat == 32767);
-		CHECK(p.decode(2, true).right_coeff == -32767);
+		// Force reversal must not turn a condition into a repelling/active effect.
+		CHECK(e.guest_frame && p.decode(2, true) == e);
 		send(p, "0550000000000000000000");
 		CHECK(p.decode(2) == e); // Y parameters must not replace steering X.
 		send(p, "41010001"); send(p, "41010101", 3000);
@@ -283,6 +285,74 @@ void gt5_force_feedback()
 	CHECK(legacy.decode(0).attack_length == 10 && legacy.decode(0).fade_length == 20);
 }
 
+bool near(int actual, double expected, double tolerance = 2)
+{
+	return std::abs(actual - expected) <= tolerance;
+}
+
+void gt5_spring_placement()
+{
+	// Values from the user's GT5 driving log: 900-degree guest range, 1080-degree
+	// host, center following the wheel, coefficient 72 and saturation 57.
+	protocol p;
+	send(p, "4380"); send(p, "401154d5");
+	CHECK(p.range == 900);
+	send(p, "0520004848670000003939"); // center 103
+	send(p, "01010740ffff00ffff200030000000"); send(p, "41010101");
+	const auto wire = p.decode(1);
+	CHECK(wire.kind == effect_kind::spring && wire.guest_frame);
+	const double ratio = 900.0 / 1080.0;
+	const double center = 103.0 / 500 * ratio; // Host fraction of the guest center.
+	const double slope = 7.2 / ratio; // Host slopes for coefficient 72.
+
+	// Without steering feedback, the spring is placed in host units but its
+	// stiffness is bounded by what SDL can express.
+	auto placed = place_condition(wire, {std::nullopt, 1080, p.range, false});
+	CHECK(!placed.guest_frame && placed.right_coeff == 32767 && placed.left_coeff == 32767);
+	CHECK(near(placed.center, center * 32767) && placed.right_sat == wire.right_sat);
+
+	// With steering from the FFB device, a full-slope spring around a virtual
+	// center gives the wheel's force: slope * error, bounded by saturation.
+	for (const double position : {0.17407, 0.1, 0.5, -0.8})
+	{
+		placed = place_condition(wire, {static_cast<int>(std::lround(position * 32767)), 1080, p.range, false});
+		const double expected = std::clamp(slope * (center - position), -57.0 / 100, 57.0 / 100);
+		CHECK(placed.right_coeff == 32767 && placed.left_coeff == 32767 && placed.deadband == 0);
+		CHECK(near(placed.center, std::clamp(position + expected, -1.0, 1.0) * 32767, 3));
+	}
+	// A small error still produces a clear aligning force (about 2% of maximum
+	// for this 1.3-degree lag; the old 1:1 host mapping pushed outward).
+	placed = place_condition(wire, {5704, 1080, p.range, false});
+	CHECK(placed.center < 5704 && near(5704 - placed.center, slope * (5704 / 32767.0 - center) * 32767, 3));
+
+	// A reversed steering mapping mirrors geometry; it never negates stiffness.
+	send(p, "0520000804670000003920"); // Coefficients 8/4, saturation 57/32.
+	const auto asymmetric = p.decode(1);
+	const auto normal = place_condition(asymmetric, {std::nullopt, 1080, 1080, false});
+	const auto mirrored = place_condition(asymmetric, {std::nullopt, 1080, 1080, true});
+	CHECK(mirrored.center == -normal.center && mirrored.right_coeff == normal.left_coeff && mirrored.left_coeff == normal.right_coeff);
+	CHECK(mirrored.right_sat == normal.left_sat && mirrored.left_sat == normal.right_sat && normal.right_coeff > normal.left_coeff && normal.left_coeff > 0);
+
+	// Soft conditions stay native. Coefficient 5 at equal ranges is half a slope.
+	send(p, "4011ffff"); send(p, "0520000505f4ff00006464");
+	placed = place_condition(p.decode(1), {0, 1080, p.range, false});
+	CHECK(near(placed.right_coeff, 16383, 10) && near(placed.center, -12.0 / 500 * 32767));
+	// Deadband keeps its wire scale (1000 is the half axis) and range ratio.
+	send(p, "4011aa6a"); send(p, "0520000505000064003232"); // guest 450 degrees, deadband 100
+	placed = place_condition(p.decode(1), {std::nullopt, 900, p.range, false});
+	CHECK(near(placed.deadband, 0.1 * 0.5 * 65535) && near(placed.right_coeff, 32767, 10));
+
+	// Dampers use the same coefficient units but no position servo.
+	send(p, "0540000303000000006464"); send(p, "01020840ffff00ffff400050000000"); send(p, "41020101");
+	placed = place_condition(p.decode(2), {1000, 900, 450, false});
+	CHECK(placed.kind == effect_kind::damper && near(placed.right_coeff, 0.3 / 0.5 * 32767, 10) && placed.center == 0);
+
+	// PC dialect effects are already in host units.
+	protocol pc(dialect::linux_reference);
+	send(pc, "052a000a05000000006464"); send(pc, "01014040ffff0000002a0038000000");
+	CHECK(place_condition(pc.decode(1), {0, 1080, 540, true}) == pc.decode(1));
+}
+
 void malformed_and_fuzz()
 {
 	protocol p;
@@ -302,13 +372,14 @@ void malformed_and_fuzz()
 	{
 		for (auto& b : bytes) b = static_cast<byte>(random());
 		p.output(std::span<const byte>(bytes).first(random() % 65), n);
-		for (std::size_t i = 0; i < 17; ++i) (void)p.decode(i, (n & 1) != 0);
+		for (std::size_t i = 0; i < 17; ++i)
+			(void)place_condition(p.decode(i, (n & 1) != 0), {static_cast<int>(random() % 65536) - 32768, static_cast<unsigned>(40 + random() % 1100), p.range, (n & 2) != 0});
 		if ((n & 255) == 0) p.reset();
 	}
 }
 
 int main()
 {
-	enumeration_and_input(); gt5_pedal_order(); initialization(); captured_constant_and_periodic(); linux_stream_and_conditions(); gt5_force_feedback(); malformed_and_fuzz();
-	std::cout << "PASS: descriptors, input, captured initialization, FFB lifecycle, 16 slots, truncation and 100000 fuzz packets\n";
+	enumeration_and_input(); gt5_pedal_order(); initialization(); captured_constant_and_periodic(); linux_stream_and_conditions(); gt5_force_feedback(); gt5_spring_placement(); malformed_and_fuzz();
+	std::cout << "PASS: descriptors, input, captured initialization, FFB lifecycle, PS3 spring placement, 16 slots, truncation and 100000 fuzz packets\n";
 }

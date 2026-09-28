@@ -165,6 +165,9 @@ private:
 	bool m_t500rs_muted = false;
 	bool m_t500rs_missing_haptic_warned = false;
 	u16 m_t500rs_host_range = 1080;
+	// PS3 springs need live steering from the same device that renders them.
+	u64 m_ffb_device_type_id = 0;
+	int m_t500rs_steering_source = -1;
 	SDL_HapticDirection m_t500rs_direction{};
 	std::array<u8, 256> m_t500rs_idle{};
 	u8 m_t500rs_hid_protocol = 1;
