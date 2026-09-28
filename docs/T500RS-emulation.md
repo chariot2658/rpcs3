@@ -2,8 +2,9 @@
 
 This patch adds a selectable T500RS guest identity backed by RPCS3's existing
 SDL wheel mappings. A user test confirms GT5 2.11 buttons and steering; the
-reported pedal exchange is corrected. PS3 force feedback is now implemented
-experimentally, **not yet verified on a physical wheel**. Earlier revisions
+reported pedal exchange is corrected. PS3 force feedback is experimental: a
+2026-09-29 test had vibration but very light steering, and the GT5 spring
+translation has since been corrected (**not yet re-tested on a wheel**). Earlier revisions
 built on GitHub Actions. Protocol and mocked host checks are described below.
 
 ## Apply and configure
@@ -75,6 +76,10 @@ when T500RS is selected; the T500RS backend handles guest-requested gain itself.
 - Automatically detected PS3 constant (type 1), spring (7), damper (8),
   START value 1, 0..128 gain, and independent opcode-81 direct X force.
   GT5 timing and signed force/condition scales follow its recovered builders.
+  GT5's spring is a position servo: its center follows the guest steering and
+  coefficient 10 is one full host slope. With steering mapped to the FFB
+  device, stiffer springs use a full-slope host spring around a live virtual
+  center; see `T500RS-GT5-FFB-next.md`.
 - Native constant force, spring and the shared `0x41` condition family. The
   latter is represented by SDL damper: the reference puts damper, friction and
   inertia on the **same** wire type and does not provide a discriminator.

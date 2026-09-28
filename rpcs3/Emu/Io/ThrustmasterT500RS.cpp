@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ThrustmasterT500RS.h"
+#include <cmath>
+#include <utility>
 
 namespace t500rs
 {
@@ -317,9 +319,12 @@ effect protocol::decode(std::size_t index, bool reverse) const
 		}
 		else if ((s.type == 7 || s.type == 8) && param.type == 5)
 		{
+			// The wheel evaluates conditions against its own position, so force
+			// reversal does not apply; place_condition() handles axis orientation.
 			out.kind = s.type == 7 ? effect_kind::spring : effect_kind::damper;
-			out.right_coeff = force(signed_byte(p[3]) * sign, 100);
-			out.left_coeff = force(signed_byte(p[4]) * sign, 100);
+			out.guest_frame = true;
+			out.right_coeff = force(signed_byte(p[3]), 100);
+			out.left_coeff = force(signed_byte(p[4]), 100);
 			out.center = force(signed_word(&p[5]), 500);
 			out.deadband = static_cast<std::uint16_t>(std::min<unsigned>(le16(&p[7]), 1000) * 65535 / 1000);
 			out.right_sat = static_cast<std::uint16_t>(std::min<unsigned>(p[9], 100) * 65535 / 100);
@@ -366,5 +371,54 @@ effect protocol::decode(std::size_t index, bool reverse) const
 		out.left_sat = static_cast<std::uint16_t>(std::min<int>(p[10], 100) * 65535 / 100);
 	}
 	return out;
+}
+
+effect place_condition(effect e, const host_axis& axis)
+{
+	if (!e.guest_frame)
+		return e;
+	e.guest_frame = false;
+	// During GT5 driving the spring center follows the steering position the
+	// guest received, with center 500 at full guest lock. Guest fraction f is
+	// host fraction f * guest_range / host_range.
+	const double ratio = static_cast<double>(std::clamp(axis.guest_range, 40u, 1080u)) / std::clamp(axis.host_range, 40u, 1080u);
+	// Coefficient 10 is one full-scale slope (hid-tmff2's Windows-derived
+	// scale). GT5 sends up to 100 with saturation near 0.79 * coefficient, so
+	// its spring saturates within about 8% of the guest range.
+	const double right = e.right_coeff / 3276.7 / ratio;
+	const double left = e.left_coeff / 3276.7 / ratio;
+	const double center = e.center / 32767.0 * ratio;
+	const double deadband = e.deadband / 65535.0 * ratio;
+	const auto s16 = [](double v) { return static_cast<std::int16_t>(std::lround(std::clamp(v, -1.0, 1.0) * 32767)); };
+	if (e.kind == effect_kind::spring && axis.position && std::max(std::abs(right), std::abs(left)) > 1)
+	{
+		// SDL coefficients cannot exceed one slope. Run a full-slope host spring
+		// around a virtual center that yields the wheel's force at the current
+		// position; the host still restores between worker updates.
+		const double position = std::clamp(*axis.position, -32767, 32767) / 32767.0;
+		const double right_sat = e.right_sat / 65535.0, left_sat = e.left_sat / 65535.0;
+		double force = 0; // Positive pushes toward the positive axis.
+		if (position > center + deadband)
+			force = std::clamp(-right * (position - center - deadband), -right_sat, right_sat);
+		else if (position < center - deadband)
+			force = std::clamp(left * (center - deadband - position), -left_sat, left_sat);
+		e.right_coeff = e.left_coeff = 32767;
+		e.center = s16(position + force);
+		e.deadband = 0;
+	}
+	else
+	{
+		e.right_coeff = s16(right);
+		e.left_coeff = s16(left);
+		e.center = s16(center);
+		e.deadband = static_cast<std::uint16_t>(std::lround(std::clamp(deadband, 0.0, 1.0) * 65535));
+	}
+	if (axis.mirrored)
+	{
+		e.center = static_cast<std::int16_t>(-e.center);
+		std::swap(e.right_coeff, e.left_coeff);
+		std::swap(e.right_sat, e.left_sat);
+	}
+	return e;
 }
 }
