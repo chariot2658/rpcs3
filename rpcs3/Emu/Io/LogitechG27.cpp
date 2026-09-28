@@ -589,6 +589,7 @@ void usb_device_logitech_g27::sdl_refresh()
 	m_steering_smoothing = steering_smoothing;
 	m_t500rs_direction = direction;
 	m_t500rs_host_range = host_range;
+	m_ffb_device_type_id = ffb_device_type_id;
 
 	SDL_Joystick* new_led_joystick_handle = nullptr;
 	SDL_Haptic* new_haptic_handle = nullptr;

@@ -2,7 +2,43 @@
 
 The user's 2026-09-25 test confirms buttons and steering. The reported pedal
 exchange is corrected separately: brake bytes 3..4, throttle 5..6, clutch 7..8.
-The new PS3 FFB decoder is experimental and still needs a physical-wheel test.
+The 2026-09-29 driving test produced vibration but very light steering; the
+spring correction below addresses that and needs another physical-wheel test.
+
+## Spring servo correction (2026-09-29 log)
+
+During driving GT5 keeps slot 1's spring running and sends about 60 opcode-05
+updates per second. Its center follows the steering word GT5 received:
+across 1,467 samples, `center / 500` matched the guest steering fraction
+(median ratio 0.993). The offset between center and wheel carries the aligning
+torque. Coefficients were typically 45..72 with saturation close to 0.79 times
+the coefficient. Constant force stayed within -13..10 of 127, which explains
+the remaining vibration.
+
+The previous translation made two mistakes:
+
+- It mapped center 500 to the host's full axis. With a 900-degree guest range
+  and a 1080-degree host, the center was placed about 20% beyond the wheel,
+  so 35% of off-center samples pushed outward.
+- It mapped coefficient 100 to one SDL slope. hid-tmff2's Windows-derived
+  scale is 10 per full slope, and GT5's saturation/coefficient ratio then puts
+  saturation within about 8% of the guest range. SDL/DirectInput cannot
+  express more than one slope.
+
+`place_condition()` now converts PS3 conditions into host units. Center and
+deadband are scaled by guest range / host range; coefficient 10 is one host
+slope. If a spring needs more than one slope and steering is mapped to an axis
+of the FFB device, the adapter runs a full-slope host spring around a virtual
+center every 4 ms. The host force at the sampled position equals the modeled
+wheel force, bounded by GT5's saturation. Otherwise the coefficient is clamped
+to one slope. A reversed steering mapping mirrors center, coefficients and
+saturations. Force reversal no longer negates PS3 condition coefficients,
+because negative spring/damper coefficients repel or add energy.
+
+Replaying the log's driving spring updates with the logged steering gives a
+median restoring torque of 12.5% of maximum (90th percentile 48%), versus 1.9%
+(8.3%) before. The coefficient scale and center interpretation are inferred
+from GT5 behavior and the PC reference, not from a real T500RS measurement.
 
 ## Confirmed cause and implemented behavior
 
@@ -44,8 +80,9 @@ the game executable is not distributed with this patch.
 - `0x00ADEB1C` onward scales condition coefficients to signed -100..100,
   center to -500..500, deadband to 0..1000 and saturation to 0..100.
   Builder `0x00AE1814` packs coefficients at 3/4, LE center at 5, LE deadband
-  at 7, saturation at 9/10. These normalize to SDL signed coefficients/center
-  and unsigned full-axis deadband/saturation; original-wheel feel is unverified.
+  at 7, saturation at 9/10. Center and deadband are relative to the guest
+  rotation range (500 and 1000 are half the range); see the spring servo
+  correction above. Original-wheel feel is unverified.
 - MAIN builder `0x00AE1604` establishes field positions above. START caller
   `0x00AA0058` and builder `0x00AE1174` establish enable/retrigger and count 1.
 - Gain builder `0x00AE214C` clamps to 128; the caller also supplies 128.
@@ -63,6 +100,11 @@ scales, upper-slot references, parameters before MAIN, finite duration/delay,
 envelopes, live updates without restart, gain, simultaneous effects, direct
 force, pause/input suppression, host failures, reconfiguration and unplug.
 Both PC fallbacks remain covered, as do 100,000 deterministic random packets.
+Spring regressions use the logged 900/1080-degree values: range conversion,
+virtual-center force below and at saturation, soft native springs, deadband,
+dampers, mirrored mappings and the fallback without FFB-device steering. The
+mocked adapter test moves the SDL steering axis and checks live updates without
+restarting the effect.
 A replay of all 1,254 OUT packets from the user's driving log has zero rejected
 packets. Acceptance alone does not prove force fidelity or host-driver support.
 
@@ -70,11 +112,13 @@ No new analysis tools or MCP installation was needed. Capstone was available
 for targeted checks beyond the supplied disassembly. No local full RPCS3 build,
 physical FFB test or thread-race test was performed for this change.
 
-For the first test, reduce strength in the physical wheel's driver and keep
-hands clear on startup. Select the intended FFB device, restart GT5, then drive
-briefly and test pause/exit. If forces pull in the wrong direction, stop the
-test and check the existing reverse-effects setting. Do not judge calibration
-from mock tests. Also retest the pedal correction and clutch.
+For the next test, reduce strength in the physical wheel's driver and keep
+hands clear on startup. Steering must be mapped to an axis of the selected FFB
+device for full spring stiffness; the log reports which mode is active. Drive
+briefly and test pause/exit. The spring should now restore firmly toward
+center. If the wheel pulls toward full lock or oscillates, stop immediately and
+report whether the steering mapping is reversed. The reverse-effects setting no
+longer changes PS3 springs or dampers. Also retest the clutch.
 
 With `T500RS: Trace`, the log now reports PS3 detection, host haptic readiness
 and capabilities, and per-slot create/update/run results. A missing SDL haptic

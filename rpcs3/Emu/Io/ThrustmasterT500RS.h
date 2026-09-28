@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 namespace t500rs
@@ -75,8 +76,24 @@ struct effect
 	std::uint16_t deadband = 0;
 	std::uint16_t right_sat = 0;
 	std::uint16_t left_sat = 0;
+	// PS3 condition still in wire units: center/deadband are fractions of the
+	// guest's rotation range and coefficient 32767 is ten full host slopes.
+	// place_condition() converts it for the host axis.
+	bool guest_frame = false;
 	bool operator==(const effect&) const = default;
 };
+
+// Physical steering state used to place PS3 conditions.
+struct host_axis
+{
+	// Host steering in guest orientation (-32767..32767), if it is read from the FFB device.
+	std::optional<int> position;
+	unsigned host_range = 1080;
+	unsigned guest_range = 1080;
+	// The FFB device's position axis runs opposite to guest steering.
+	bool mirrored = false;
+};
+effect place_condition(effect e, const host_axis& axis);
 
 struct slot
 {

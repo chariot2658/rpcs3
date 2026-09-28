@@ -269,6 +269,7 @@ void usb_device_logitech_g27::invalidate_t500rs_haptics()
 	m_t500rs_autocenter = -1;
 	m_t500rs_autocenter_id = -1;
 	m_t500rs_muted = false;
+	m_t500rs_steering_source = -1;
 }
 
 namespace
@@ -401,6 +402,32 @@ void usb_device_logitech_g27::update_t500rs_haptics()
 		m_t500rs_autocenter = autocenter;
 	}
 
+	// GT5 drives its spring as a servo around the steering position it read,
+	// which requires the position of the wheel that renders the spring.
+	t500rs::host_axis axis;
+	axis.host_range = m_t500rs_host_range;
+	axis.guest_range = snapshot.range;
+	const sdl_mapping& steering = m_mapping.steering;
+	if (const auto it = m_joysticks.find(steering.device_type_id);
+		steering.type == sdl_mapping_type::axis && steering.device_type_id == m_ffb_device_type_id && it != m_joysticks.end() && !it->second.empty())
+	{
+		int sum = 0;
+		for (SDL_Joystick* joystick : it->second)
+			sum += SDL_GetJoystickAxis(joystick, static_cast<int>(steering.id));
+		const int raw = sum / static_cast<int>(it->second.size());
+		axis.position = steering.reverse ? -raw : raw;
+		axis.mirrored = steering.reverse;
+	}
+	const int steering_source = axis.position ? 1 + axis.mirrored : 0;
+	if (snapshot.ps3_active() && steering_source != m_t500rs_steering_source)
+	{
+		if (axis.position)
+			t500rs_log.notice("PS3 springs follow live steering from the FFB device (mirrored=%d)", axis.mirrored);
+		else
+			t500rs_log.warning("Steering is not mapped to an axis of the FFB device; PS3 spring stiffness is limited to the host maximum");
+		m_t500rs_steering_source = steering_source;
+	}
+
 	const u64 now = get_timestamp();
 	for (std::size_t i = 0; i < m_t500rs_host_slots.size(); ++i)
 	{
@@ -434,6 +461,7 @@ void usb_device_logitech_g27::update_t500rs_haptics()
 		effect.left_coeff = scale(effect.left_coeff);
 		effect.right_sat = scale(effect.right_sat);
 		effect.left_sat = scale(effect.left_sat);
+		effect = t500rs::place_condition(effect, axis);
 		// Some host drivers lack square-wave support. Synthesize a constant
 		// slot, retaining START/STOP and delay/duration semantics.
 		if (effect.kind == t500rs::effect_kind::square && !(SDL_GetHapticFeatures(m_haptic_handle) & SDL_HAPTIC_SQUARE))
