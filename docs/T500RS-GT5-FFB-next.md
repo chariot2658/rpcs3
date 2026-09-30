@@ -5,6 +5,34 @@ exchange is corrected separately: brake bytes 3..4, throttle 5..6, clutch 7..8.
 The 2026-09-29 driving test produced vibration but very light steering; the
 spring correction below addresses that and needs another physical-wheel test.
 
+## Firmware scales (2026-09-30)
+
+Static analysis of the T500RS firmware v47 (a PIC24FJ GB USB controller that
+also evaluates effects and drives the motor PWM) replaced the inferred scales
+of the PS3 path. The firmware itself is not distributed.
+
+- Spring: force / full torque = `dx * c * 4r / (90 * 127)`, where `dx` spans
+  +-512 over the half guest range and `r = guest range / 1080`. In degrees,
+  force / full is about `c * degrees off center / 3015` at any range. One host
+  slope over the half guest range is coefficient `6027.5 / guest range`:
+  6.7 at 900 degrees, 5.6 at 1080 degrees. The previous value was 10.
+- Saturation `s` limits condition force to `s / 127` of full torque, not
+  `s / 100`. Springs are additionally limited to
+  `4r * min(100, s + s/8 + s/16) / 127`, which only matters below about 340
+  degrees.
+- Constant level `L` becomes `255 * L / 127`, so |L| = 64 is full torque.
+  Envelope levels use the same scale. GT5's -13..10 road texture is therefore
+  about +-20% torque, not +-10%. Direct force (opcode `81`) stays `L / 127`.
+- Damper coefficients act on steering speed, whose units could not be
+  recovered, so coefficient 10 remains one SDL slope. Damper saturation uses
+  the firmware's `s / 127`.
+
+The firmware sums all effects into one +-127 clamp before gain; SDL mixes
+effects in the host driver instead. The firmware also negates constant force
+on the steering axis relative to condition force; the absolute motor direction
+cannot be read from the code and is not changed here. The sections below
+describe the earlier inferred model, now superseded for these scales.
+
 ## Spring servo correction (2026-09-29 log)
 
 During driving GT5 keeps slot 1's spring running and sends about 60 opcode-05
@@ -26,8 +54,8 @@ The previous translation made two mistakes:
   express more than one slope.
 
 `place_condition()` now converts PS3 conditions into host units. Center and
-deadband are scaled by guest range / host range; coefficient 10 is one host
-slope. If a spring needs more than one slope and steering is mapped to an axis
+deadband are scaled by guest range / host range; coefficient 10 was one host
+slope (now `6027.5 / guest range`, see above). If a spring needs more than one slope and steering is mapped to an axis
 of the FFB device, the adapter runs a full-slope host spring around a virtual
 center every 4 ms. The host force at the sampled position equals the modeled
 wheel force, bounded by GT5's saturation. Otherwise the coefficient is clamped
@@ -74,8 +102,10 @@ the game executable is not distributed with this patch.
 - Constant wrapper `0x00ADF080` scales signed -10000..10000 to -127..127 at
   `0x00ADF148` onward and supplies type 1 at `0x00ADF1B4`.
 - Wrappers `0x00ADED9C` and `0x00ADED70` supply types 7 and 8 to common builder
-  `0x00ADEA50`. The named field table maps `THRUSTMASTER_SPRING_X_POS_K` to
-  ID 0x20 at `0x016B9D5C`, and the damper field to ID 0x31 at `0x016B9DE4`.
+  `0x00ADEA50`. The `{value, name}` enum table at `0x016B9CB8` (8-byte
+  entries) gives `THRUSTMASTER_SPRING_X_POS_K` ID 0x1F (entry `0x016B9D58`)
+  and `THRUSTMASTER_DAMPER_X_POS_K` ID 0x30 (entry `0x016B9DE0`). These enum
+  IDs are not wire parameter references; slot 1's spring block is 0x20.
   The corresponding caller loads feed slot 1 spring and slot 2 damper.
 - `0x00ADEB1C` onward scales condition coefficients to signed -100..100,
   center to -500..500, deadband to 0..1000 and saturation to 0..100.
@@ -88,7 +118,7 @@ the game executable is not distributed with this patch.
 - Gain builder `0x00AE214C` clamps to 128; the caller also supplies 128.
 - Envelope builder `0x00AE1D14`: reference at 1, attack length at 3, level at
   5, fade length at 6, level at 8. Levels use 0..127.
-- FORCE_X/Y table IDs 0x10/0x11 feed `0x00ADF26C` through caller
+- FORCE_X/Y enum IDs 0x0F/0x10 feed `0x00ADF26C` through caller
   `0x00AA0F44`, then builder `0x00AE1EE0` emits opcode 81 and signed X/Y,
   replacing -128 with -127. Direct force lifetime is modeled as persistent
   until zero/reset; this path's nonzero physical behavior needs validation.

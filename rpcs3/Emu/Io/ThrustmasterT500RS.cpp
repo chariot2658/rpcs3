@@ -307,14 +307,16 @@ effect protocol::decode(std::size_t index, bool reverse) const
 		out.delay = s.delay;
 		if (s.type == 1 && param.type == 3)
 		{
+			// Firmware v47 multiplies constant levels by its constant waveform
+			// value 255 / 127, so level 64 already reaches full torque.
 			out.kind = effect_kind::constant;
-			out.level = force(signed_byte(p[3]) * sign, 127);
+			out.level = force(signed_byte(p[3]) * 255 * sign, 127 * 127);
 			if (env[0] == 2)
 			{
 				out.attack_length = le16(&env[3]);
-				out.attack_level = force(std::min<int>(env[5], 127), 127);
+				out.attack_level = force(std::min<int>(env[5], 127) * 255, 127 * 127);
 				out.fade_length = le16(&env[6]);
-				out.fade_level = force(std::min<int>(env[8], 127), 127);
+				out.fade_level = force(std::min<int>(env[8], 127) * 255, 127 * 127);
 			}
 		}
 		else if ((s.type == 7 || s.type == 8) && param.type == 5)
@@ -327,8 +329,9 @@ effect protocol::decode(std::size_t index, bool reverse) const
 			out.left_coeff = force(signed_byte(p[4]), 100);
 			out.center = force(signed_word(&p[5]), 500);
 			out.deadband = static_cast<std::uint16_t>(std::min<unsigned>(le16(&p[7]), 1000) * 65535 / 1000);
-			out.right_sat = static_cast<std::uint16_t>(std::min<unsigned>(p[9], 100) * 65535 / 100);
-			out.left_sat = static_cast<std::uint16_t>(std::min<unsigned>(p[10], 100) * 65535 / 100);
+			// Firmware v47 clamps condition force to saturation s of 127 full torque.
+			out.right_sat = static_cast<std::uint16_t>(std::min<unsigned>(p[9], 127) * 65535 / 127);
+			out.left_sat = static_cast<std::uint16_t>(std::min<unsigned>(p[10], 127) * 65535 / 127);
 		}
 		return out;
 	}
@@ -381,12 +384,29 @@ effect place_condition(effect e, const host_axis& axis)
 	// During GT5 driving the spring center follows the steering position the
 	// guest received, with center 500 at full guest lock. Guest fraction f is
 	// host fraction f * guest_range / host_range.
-	const double ratio = static_cast<double>(std::clamp(axis.guest_range, 40u, 1080u)) / std::clamp(axis.host_range, 40u, 1080u);
-	// Coefficient 10 is one full-scale slope (hid-tmff2's Windows-derived
-	// scale). GT5 sends up to 100 with saturation near 0.79 * coefficient, so
-	// its spring saturates within about 8% of the guest range.
-	const double right = e.right_coeff / 3276.7 / ratio;
-	const double left = e.left_coeff / 3276.7 / ratio;
+	const unsigned guest_range = std::clamp(axis.guest_range, 40u, 1080u);
+	const double ratio = static_cast<double>(guest_range) / std::clamp(axis.host_range, 40u, 1080u);
+	// Firmware v47 spring (kernel 0x7B16): force / full = dx * c * 4r / (90 * 127),
+	// with dx in +-512 per half guest range and r = guest range / 1080. One
+	// guest half-range slope is c = 6027.5 / guest range (6.7 at 900 degrees).
+	// Damper velocity units are unknown, so coefficient 10 stays one slope.
+	const bool spring = e.kind == effect_kind::spring;
+	const double scale = (spring ? guest_range / 6027.5 : 0.1) / ratio;
+	const double right = e.right_coeff / 327.67 * scale;
+	const double left = e.left_coeff / 327.67 * scale;
+	if (spring)
+	{
+		// The kernel clamps to min(100, ~1.19 s) before the 4r range factor, then
+		// to s. The first clamp only matters below about 340 degrees.
+		const auto limit = [boost = 4.0 * guest_range / 1080](std::uint16_t sat)
+		{
+			const int s = static_cast<int>(std::lround(sat * 127 / 65535.0));
+			const double first = boost * std::min(100, s + (s >> 3) + (s >> 4)) / 127;
+			return static_cast<std::uint16_t>(std::lround(std::min(sat / 65535.0, first) * 65535));
+		};
+		e.right_sat = limit(e.right_sat);
+		e.left_sat = limit(e.left_sat);
+	}
 	const double center = e.center / 32767.0 * ratio;
 	const double deadband = e.deadband / 65535.0 * ratio;
 	const auto s16 = [](double v) { return static_cast<std::int16_t>(std::lround(std::clamp(v, -1.0, 1.0) * 32767)); };
