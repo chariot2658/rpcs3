@@ -232,19 +232,19 @@ void gt5_force_feedback()
 		send(p, "01010740ffff00ffff200030000000");
 		send(p, "41010101", 1000);
 		CHECK(p.effect_slots[1].playing && p.decode(1).kind == effect_kind::spring);
-		CHECK(p.decode(1).right_coeff == 25 * 32767 / 100 && p.decode(1).right_sat == 18 * 65535 / 100);
+		CHECK(p.decode(1).right_coeff == 25 * 32767 / 100 && p.decode(1).right_sat == 18 * 65535 / 127);
 		const auto starts = p.effect_slots[1].starts;
 		send(p, "0520002e2efeff00002424");
 		CHECK(p.effect_slots[1].starts == starts && p.decode(1).center == -2 * 32767 / 500);
 		CHECK(p.decode(1).left_coeff == 46 * 32767 / 100);
 		send(p, "01000140ffff00ffff000010000000");
 		send(p, "030000ff"); send(p, "41000101", 2000);
-		CHECK(p.decode(0).kind == effect_kind::constant && p.decode(0).level == -32767 / 127);
+		CHECK(p.decode(0).kind == effect_kind::constant && p.decode(0).level == -255 * 32767 / (127 * 127));
 		send(p, "01020840ffff00ffff400050000000");
 		send(p, "0540006432f401e8036432"); send(p, "41020101", 2000);
 		const auto e = p.decode(2);
 		CHECK(e.kind == effect_kind::damper && e.right_coeff == 32767 && e.left_coeff == 16383);
-		CHECK(e.center == 32767 && e.deadband == 65535 && e.right_sat == 65535 && e.left_sat == 32767);
+		CHECK(e.center == 32767 && e.deadband == 65535 && e.right_sat == 100 * 65535 / 127 && e.left_sat == 50 * 65535 / 127);
 		// Force reversal must not turn a condition into a repelling/active effect.
 		CHECK(e.guest_frame && p.decode(2, true) == e);
 		send(p, "0550000000000000000000");
@@ -259,7 +259,7 @@ void gt5_force_feedback()
 		const auto high = p.decode(8);
 		CHECK(high.level == 32767 && p.decode(0).level == -32767);
 		CHECK(high.length == 1000 && high.delay == 250 && high.attack_length == 100 && high.fade_length == 200);
-		CHECK(high.attack_level == 64 * 32767 / 127 && high.fade_level == 32 * 32767 / 127);
+		CHECK(high.attack_level == 32767 && high.fade_level == 32 * 255 * 32767 / (127 * 127));
 		CHECK(p.output(hex("0300027f")) == result::malformed);
 		CHECK(p.output(hex("021002000000000000")) == result::malformed);
 		CHECK(p.output(hex("01080140ffff00ffff000210020000")) == result::malformed);
@@ -277,7 +277,7 @@ void gt5_force_feedback()
 	// Parameters may precede the first MAIN that identifies PS3 format.
 	protocol staged;
 	send(staged, "03000140"); send(staged, "01080140ffff00ffff000110010000");
-	CHECK(staged.ps3_active() && staged.decode(8).level == 64 * 32767 / 127);
+	CHECK(staged.ps3_active() && staged.decode(8).level == 32767);
 	// Preserve Linux's different envelope layout (byte 2 is attack length).
 	protocol legacy(dialect::linux_reference);
 	send(legacy, "021c0a007f14007f00"); send(legacy, "030e007f");
@@ -303,7 +303,7 @@ void gt5_spring_placement()
 	CHECK(wire.kind == effect_kind::spring && wire.guest_frame);
 	const double ratio = 900.0 / 1080.0;
 	const double center = 103.0 / 500 * ratio; // Host fraction of the guest center.
-	const double slope = 7.2 / ratio; // Host slopes for coefficient 72.
+	const double slope = 72 * 900 / 6027.5 / ratio; // Firmware host slopes for coefficient 72.
 
 	// Without steering feedback, the spring is placed in host units but its
 	// stiffness is bounded by what SDL can express.
@@ -316,11 +316,11 @@ void gt5_spring_placement()
 	for (const double position : {0.17407, 0.1, 0.5, -0.8})
 	{
 		placed = place_condition(wire, {static_cast<int>(std::lround(position * 32767)), 1080, p.range, false});
-		const double expected = std::clamp(slope * (center - position), -57.0 / 100, 57.0 / 100);
+		const double expected = std::clamp(slope * (center - position), -57.0 / 127, 57.0 / 127);
 		CHECK(placed.right_coeff == 32767 && placed.left_coeff == 32767 && placed.deadband == 0);
 		CHECK(near(placed.center, std::clamp(position + expected, -1.0, 1.0) * 32767, 3));
 	}
-	// A small error still produces a clear aligning force (about 2% of maximum
+	// A small error still produces a clear aligning force (about 3% of maximum
 	// for this 1.3-degree lag; the old 1:1 host mapping pushed outward).
 	placed = place_condition(wire, {5704, 1080, p.range, false});
 	CHECK(placed.center < 5704 && near(5704 - placed.center, slope * (5704 / 32767.0 - center) * 32767, 3));
@@ -333,14 +333,14 @@ void gt5_spring_placement()
 	CHECK(mirrored.center == -normal.center && mirrored.right_coeff == normal.left_coeff && mirrored.left_coeff == normal.right_coeff);
 	CHECK(mirrored.right_sat == normal.left_sat && mirrored.left_sat == normal.right_sat && normal.right_coeff > normal.left_coeff && normal.left_coeff > 0);
 
-	// Soft conditions stay native. Coefficient 5 at equal ranges is half a slope.
+	// Soft conditions stay native. Coefficient 5 at 1080 degrees is 0.9 slope.
 	send(p, "4011ffff"); send(p, "0520000505f4ff00006464");
 	placed = place_condition(p.decode(1), {0, 1080, p.range, false});
-	CHECK(near(placed.right_coeff, 16383, 10) && near(placed.center, -12.0 / 500 * 32767));
+	CHECK(near(placed.right_coeff, 5 * 1080 / 6027.5 * 32767, 10) && near(placed.center, -12.0 / 500 * 32767));
 	// Deadband keeps its wire scale (1000 is the half axis) and range ratio.
 	send(p, "4011aa6a"); send(p, "0520000505000064003232"); // guest 450 degrees, deadband 100
 	placed = place_condition(p.decode(1), {std::nullopt, 900, p.range, false});
-	CHECK(near(placed.deadband, 0.1 * 0.5 * 65535) && near(placed.right_coeff, 32767, 10));
+	CHECK(near(placed.deadband, 0.1 * 0.5 * 65535) && near(placed.right_coeff, 5 * 450 / 6027.5 / 0.5 * 32767, 10));
 
 	// Dampers use the same coefficient units but no position servo.
 	send(p, "0540000303000000006464"); send(p, "01020840ffff00ffff400050000000"); send(p, "41020101");

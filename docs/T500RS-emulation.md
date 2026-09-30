@@ -77,7 +77,9 @@ when T500RS is selected; the T500RS backend handles guest-requested gain itself.
   START value 1, 0..128 gain, and independent opcode-81 direct X force.
   GT5 timing and signed force/condition scales follow its recovered builders.
   GT5's spring is a position servo: its center follows the guest steering and
-  coefficient 10 is one full host slope. With steering mapped to the FFB
+  coefficient `6027.5 / guest range` (6.7 at 900 degrees) is one full host
+  slope, per static analysis of firmware v47. Saturation is `s / 127` and
+  constant level 64 is full torque. With steering mapped to the FFB
   device, stiffer springs use a full-slope host spring around a live virtual
   center; see `T500RS-GT5-FFB-next.md`.
 - Native constant force, spring and the shared `0x41` condition family. The

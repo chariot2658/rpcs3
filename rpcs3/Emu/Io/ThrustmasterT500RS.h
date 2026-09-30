@@ -77,7 +77,7 @@ struct effect
 	std::uint16_t right_sat = 0;
 	std::uint16_t left_sat = 0;
 	// PS3 condition still in wire units: center/deadband are fractions of the
-	// guest's rotation range and coefficient 32767 is ten full host slopes.
+	// guest's rotation range and coefficient 32767 is wire coefficient 100.
 	// place_condition() converts it for the host axis.
 	bool guest_frame = false;
 	bool operator==(const effect&) const = default;
