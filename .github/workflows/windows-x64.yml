@@ -28,8 +28,74 @@ env:
   BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts/
 
 jobs:
+  # Rebase t500rs onto upstream master only when new commits are pushed; there
+  # is no scheduled rebase. If a rebase is pushed, the build runs on that new
+  # head instead of here. On conflicts the pushed commit is built unrebased.
+  rebase:
+    name: Rebase t500rs onto upstream
+    if: github.event_name == 'push' && github.repository == 'chariot2658/rpcs3'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: write
+      contents: write
+    env:
+      HAS_REBASE_TOKEN: ${{ secrets.REBASE_TOKEN != '' }}
+    outputs:
+      rebased: ${{ steps.rebase.outputs.rebased }}
+
+    steps:
+      - name: Checkout pushed commit
+        uses: actions/checkout@main
+        with:
+          fetch-depth: 0
+          # GITHUB_TOKEN can never push commits that touch .github/workflows/,
+          # which upstream rebases regularly do. REBASE_TOKEN must be a PAT with
+          # Contents + Workflows write access to this repository.
+          token: ${{ secrets.REBASE_TOKEN || github.token }}
+
+      - name: Rebase onto RPCS3 master
+        id: rebase
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/RPCS3/rpcs3.git
+          git fetch --no-tags upstream master
+
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo 'rebased=false' >> "$GITHUB_OUTPUT"
+            echo 't500rs is already based on the latest upstream master.'
+            exit 0
+          fi
+
+          if ! git rebase upstream/master; then
+            git rebase --abort
+            echo 'rebased=false' >> "$GITHUB_OUTPUT"
+            echo '::warning::Rebase onto upstream master conflicted; building the pushed commit unrebased.'
+            exit 0
+          fi
+
+          git push origin HEAD:refs/heads/t500rs \
+            --force-with-lease="refs/heads/t500rs:${GITHUB_SHA}"
+          echo 'rebased=true' >> "$GITHUB_OUTPUT"
+
+      # A push made with REBASE_TOKEN starts this workflow again for the rebased
+      # head. A push made with GITHUB_TOKEN does not, so dispatch the build.
+      - name: Trigger Windows x64 build
+        if: steps.rebase.outputs.rebased == 'true' && env.HAS_REBASE_TOKEN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run windows-x64.yml --repo "$GITHUB_REPOSITORY" --ref t500rs
+
   windows_x64:
     name: RPCS3 Windows x64 Release
+    needs: rebase
+    # Runs for dispatches, PRs and pushes that needed no rebase. A pushed
+    # rebase is built by the run it starts.
+    if: ${{ !cancelled() && needs.rebase.outputs.rebased != 'true' }}
     runs-on: windows-2025-vs2026
     timeout-minutes: 360
     env:
